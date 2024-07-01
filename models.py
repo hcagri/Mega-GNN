@@ -3,19 +3,41 @@ from torch_geometric.nn import GINEConv, BatchNorm, Linear, GATConv, PNAConv, RG
 import torch.nn.functional as F
 import torch
 import logging
+import numpy as np
+from torch_scatter import scatter
+from genagg import GenAgg
+from genagg.MLPAutoencoder import MLPAutoencoder
+
+
+class MultiEdgeAggModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.agg = GenAgg(f=MLPAutoencoder, jit=False)
+        
+    def forward(self, edge_index, edge_attr, simp_edge_batch):
+        _, inverse_indices = torch.unique(simp_edge_batch, return_inverse=True)
+        new_edge_index = scatter(edge_index, inverse_indices, dim=1, reduce='mean')
+        new_edge_attr = self.agg(x=edge_attr, index=inverse_indices)
+        return new_edge_index, new_edge_attr
+    
+    def reset_parameters(self):
+        self.agg.reset_parameters()
 
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                 n_hidden=100, edge_updates=False, residual=True, 
-                edge_dim=None, dropout=0.0, final_dropout=0.5):
+                edge_dim=None, dropout=0.0, final_dropout=0.5, flatten_edges=False):
         super().__init__()
         self.n_hidden = n_hidden
         self.num_gnn_layers = num_gnn_layers
         self.edge_updates = edge_updates
         self.final_dropout = final_dropout
+        self.flatten_edges = flatten_edges
 
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
+
+        self.edge_agg = MultiEdgeAggModule()
 
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
@@ -37,14 +59,19 @@ class GINe(torch.nn.Module):
         self.mlp = nn.Sequential(Linear(n_hidden*3, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
                               Linear(25, n_classes))
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr, simp_edge_batch=None):
+
         src, dst = edge_index
 
         x = self.node_emb(x)
         edge_attr = self.edge_emb(edge_attr)
 
         for i in range(self.num_gnn_layers):
-            x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
+            if self.flatten_edges:
+                n_edge_index, n_edge_attr  = self.edge_agg(edge_index, edge_attr, simp_edge_batch)
+                x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
+            else:
+                x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
             if self.edge_updates: 
                 edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
 

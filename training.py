@@ -2,12 +2,16 @@ import torch
 import tqdm
 from sklearn.metrics import f1_score
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
+from data_util import z_norm
 from models import GINe, PNA, GATe, RGCN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
 from torch_geometric.utils import degree
 import wandb
 import logging
+import time
+from torch_scatter import scatter
+import numpy as np
 
 def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
     #training
@@ -74,8 +78,18 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
         preds = []
         ground_truths = []
         for batch in tqdm.tqdm(tr_loader, disable=not args.tqdm):
+            
+            # s_time = time.time()
+            # Add port numberings after neighborhood sampling. 
+            if args.ports and args.ports_batch:
+                # To be consistent, sample the edges for forward and backward edge types.
+                batch['node', 'rev_to', 'node'].edge_index = batch['node', 'to', 'node'].edge_index.flipud().detach().clone()
+                batch['node', 'rev_to', 'node'].e_id = batch['node', 'to', 'node'].e_id
+                batch.add_ports()
+            
             optimizer.zero_grad()
             #select the seed edges from which the batch was created
+
             inds = tr_inds.detach().cpu()
             batch_edge_inds = inds[batch['node', 'to', 'node'].input_id.detach().cpu()]
             batch_edge_ids = tr_loader.data['node', 'to', 'node'].edge_attr.detach().cpu()[batch_edge_inds, 0]
@@ -86,7 +100,11 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
             batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
 
             batch.to(device)
-            out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+            if args.flatten_edges:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
+            else:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+
             out = out[('node', 'to', 'node')]
             pred = out[mask]
             ground_truth = batch['node', 'to', 'node'].y[mask]
@@ -99,12 +117,15 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
             total_loss += float(loss) * pred.numel()
             total_examples += pred.numel()
+
+            # e_time = time.time()
+            # print(f"Batch process time: {e_time-s_time:.4f}, Loss: {loss.item()}")
             
         pred = torch.cat(preds, dim=0).detach().cpu().numpy()
         ground_truth = torch.cat(ground_truths, dim=0).detach().cpu().numpy()
         f1 = f1_score(ground_truth, pred)
         wandb.log({"f1/train": f1}, step=epoch)
-        logging.info(f'Train F1: {f1:.4f}')
+        logging.info(f'Epoch: {epoch}, Train F1: {f1:.4f}')
 
         #evaluate
         val_f1 = evaluate_hetero(val_loader, val_inds, model, val_data, device, args)
@@ -133,7 +154,7 @@ def get_model(sample_batch, config, args):
         model = GINe(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
                 n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
-                dropout=config.dropout, final_dropout=config.final_dropout
+                dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges
                 )
     elif args.model == "gat":
         model = GATe(
@@ -205,6 +226,15 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
 
     #get the model
     sample_batch = next(iter(tr_loader))
+
+    if args.ports and args.ports_batch:
+        # Add a placeholder for the port features so that the model is loaded correctly!
+        if isinstance(sample_batch, HeteroData):
+            sample_batch['node', 'to', 'node'].edge_attr = torch.cat([sample_batch['node', 'to', 'node'].edge_attr, torch.zeros((sample_batch['node', 'to', 'node'].edge_attr.shape[0], 2))], dim=1)
+            sample_batch['node', 'rev_to', 'node'].edge_attr = torch.cat([sample_batch['node', 'rev_to', 'node'].edge_attr, torch.zeros((sample_batch['node', 'rev_to', 'node'].edge_attr.shape[0], 2))], dim=1)
+        else:
+            sample_batch.edge_attr = torch.cat([sample_batch.edge_attr, torch.zeros((sample_batch.edge_attr.shape[0], 2))], dim=1)
+
     model = get_model(sample_batch, config, args)
 
     if args.reverse_mp:
@@ -225,7 +255,10 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     else:
         sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
     sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
-    logging.info(summary(model, sample_x, sample_edge_index, sample_edge_attr))
+
+    if args.flatten_edges:
+        sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
+    logging.info(summary(model, sample_x, sample_edge_index, sample_edge_attr, sample_simp_edge_batch))
     
     loss_fn = torch.nn.CrossEntropyLoss(weight=torch.FloatTensor([config.w_ce1, config.w_ce2]).to(device))
 

@@ -30,6 +30,7 @@ class AddEgoIds(BaseTransform):
         return data
 
 def extract_param(parameter_name: str, args) -> float:
+    
     """
     Extract the value of the specified parameter for the given model.
     
@@ -177,7 +178,11 @@ def evaluate_hetero(loader, inds, model, data, device, args):
         
         with torch.no_grad():
             batch.to(device)
-            out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+            if args.flatten_edges:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
+            else:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+                
             out = out[('node', 'to', 'node')]
             out = out[mask]
             pred = out.argmax(dim=-1)

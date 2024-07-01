@@ -27,6 +27,7 @@ def create_parser():
     parser.add_argument("--emlps", action='store_true', help="Use emlps in GNN training")
     parser.add_argument("--reverse_mp", action='store_true', help="Use reverse MP in GNN training")
     parser.add_argument("--ports", action='store_true', help="Use port numberings in GNN training")
+    parser.add_argument("--ports_batch", action='store_true', help="Use port numberings in GNN training but compute port numbers after neighborhood sampling.")
     parser.add_argument("--tds", action='store_true', help="Use time deltas (i.e. the time between subsequent transactions) in GNN training")
     parser.add_argument("--ego", action='store_true', help="Use ego IDs in GNN training")
 
@@ -34,6 +35,7 @@ def create_parser():
     parser.add_argument("--batch_size", default=8192, type=int, help="Select the batch size for GNN training")
     parser.add_argument("--n_epochs", default=100, type=int, help="Select the number of epochs for GNN training")
     parser.add_argument('--num_neighs', nargs='+', default=[100,100], help='Pass the number of neighors to be sampled in each hop (descending).')
+    parser.add_argument("--flatten_edges", action='store_true', help="Flatten parallel edges with deep set.")
 
     #Misc
     parser.add_argument("--seed", default=1, type=int, help="Select the random seed for reproducability")
