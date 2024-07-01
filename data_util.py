@@ -138,7 +138,7 @@ def z_norm(data):
     std = torch.where(std == 0, torch.tensor(1, dtype=torch.float32).cpu(), std)
     return (data - data.mean(0).unsqueeze(0)) / std
 
-def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args):
+def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edge_batch=None):
     '''Creates a heterogenous graph object for reverse message passing'''
     data = HeteroGraphData()
 
@@ -147,6 +147,11 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args):
     data['node', 'rev_to', 'node'].edge_index = edge_index.flipud()
     data['node', 'to', 'node'].edge_attr = edge_attr
     data['node', 'rev_to', 'node'].edge_attr = edge_attr
+
+    if args.flatten_edges:
+        data['node', 'to', 'node'].edge_attr = simp_edge_batch
+        data['node', 'rev_to', 'node'].edge_attr = simp_edge_batch
+
     if args.ports:
         #swap the in- and outgoing port numberings for the reverse edges
         data['node', 'rev_to', 'node'].edge_attr[:, [-1, -2]] = data['node', 'rev_to', 'node'].edge_attr[:, [-2, -1]]
@@ -154,3 +159,17 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args):
     data['node', 'to', 'node'].timestamps = timestamps
     
     return data
+
+def find_parallel_edges(edge_index):
+    simplified_edge_mapping = {}
+    simplified_edge_batch = []
+    i = 0
+    for edge in edge_index.T:
+        tuple_edge = tuple(edge.tolist())
+        if tuple_edge not in simplified_edge_mapping:
+            simplified_edge_mapping[tuple_edge] = i
+            i += 1
+        simplified_edge_batch.append(simplified_edge_mapping[tuple_edge])
+    simplified_edge_batch = torch.LongTensor(simplified_edge_batch)
+
+    return simplified_edge_batch

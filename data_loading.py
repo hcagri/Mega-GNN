@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import logging
 import itertools
-from data_util import GraphData, HeteroData, z_norm, create_hetero_obj
+from data_util import GraphData, HeteroData, z_norm, create_hetero_obj, find_parallel_edges
 
 def get_data(args, data_config):
     '''Loads the AML transaction data.
@@ -38,6 +38,8 @@ def get_data(args, data_config):
     x = torch.tensor(df_nodes.loc[:, node_features].to_numpy()).float()
     edge_index = torch.LongTensor(df_edges.loc[:, ['from_id', 'to_id']].to_numpy().T)
     edge_attr = torch.tensor(df_edges.loc[:, edge_features].to_numpy()).float()
+
+    simp_edge_batch = find_parallel_edges(edge_index) if args.flatten_edges else None
 
     n_days = int(timestamps.max() / (3600 * 24) + 1)
     n_samples = y.shape[0]
@@ -101,9 +103,16 @@ def get_data(args, data_config):
     val_edge_index, val_edge_attr, val_y, val_edge_times = edge_index[:,e_val], edge_attr[e_val], y[e_val], timestamps[e_val]
     te_edge_index,  te_edge_attr,  te_y,  te_edge_times  = edge_index,          edge_attr,        y,        timestamps
 
-    tr_data = GraphData (x=tr_x,  y=tr_y,  edge_index=tr_edge_index,  edge_attr=tr_edge_attr,  timestamps=tr_edge_times )
-    val_data = GraphData(x=val_x, y=val_y, edge_index=val_edge_index, edge_attr=val_edge_attr, timestamps=val_edge_times)
-    te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr,  timestamps=te_edge_times )
+    if args.flatten_edges:
+        tr_simp_edge_batch, val_simp_edge_batch, te_simp_edge_batch = simp_edge_batch[e_tr], simp_edge_batch[e_val], simp_edge_batch
+        tr_data = GraphData (x=tr_x,  y=tr_y,  edge_index=tr_edge_index,  edge_attr=tr_edge_attr,  timestamps=tr_edge_times , simp_edge_batch = tr_simp_edge_batch)
+        val_data = GraphData(x=val_x, y=val_y, edge_index=val_edge_index, edge_attr=val_edge_attr, timestamps=val_edge_times, simp_edge_batch = val_simp_edge_batch)
+        te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr,  timestamps=te_edge_times , simp_edge_batch = te_simp_edge_batch)
+    else:
+        tr_simp_edge_batch, val_simp_edge_batch, te_simp_edge_batch = None, None, None
+        tr_data = GraphData (x=tr_x,  y=tr_y,  edge_index=tr_edge_index,  edge_attr=tr_edge_attr,  timestamps=tr_edge_times )
+        val_data = GraphData(x=val_x, y=val_y, edge_index=val_edge_index, edge_attr=val_edge_attr, timestamps=val_edge_times)
+        te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr,  timestamps=te_edge_times )
 
     #Adding ports and time-deltas if applicable
     if args.ports:
@@ -129,9 +138,9 @@ def get_data(args, data_config):
     #Create heterogenous if reverese MP is enabled
     #TODO: if I observe wierd behaviour, maybe add .detach.clone() to all torch tensors, but I don't think they're attached to any computation graph just yet
     if args.reverse_mp:
-        tr_data = create_hetero_obj(tr_data.x,  tr_data.y,  tr_data.edge_index,  tr_data.edge_attr, tr_data.timestamps, args)
-        val_data = create_hetero_obj(val_data.x,  val_data.y,  val_data.edge_index,  val_data.edge_attr, val_data.timestamps, args)
-        te_data = create_hetero_obj(te_data.x,  te_data.y,  te_data.edge_index,  te_data.edge_attr, te_data.timestamps, args)
+        tr_data = create_hetero_obj(tr_data.x,  tr_data.y,  tr_data.edge_index,  tr_data.edge_attr, tr_data.timestamps, args, tr_simp_edge_batch)
+        val_data = create_hetero_obj(val_data.x,  val_data.y,  val_data.edge_index,  val_data.edge_attr, val_data.timestamps, args, val_simp_edge_batch)
+        te_data = create_hetero_obj(te_data.x,  te_data.y,  te_data.edge_index,  te_data.edge_attr, te_data.timestamps, args, te_simp_edge_batch)
     
     logging.info(f'train data object: {tr_data}')
     logging.info(f'validation data object: {val_data}')
