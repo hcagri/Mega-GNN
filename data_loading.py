@@ -115,7 +115,7 @@ def get_data(args, data_config):
         te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr,  timestamps=te_edge_times )
 
     #Adding ports and time-deltas if applicable
-    if args.ports:
+    if args.ports and not args.ports_batch:
         logging.info(f"Start: adding ports")
         tr_data.add_ports()
         val_data.add_ports()

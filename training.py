@@ -2,7 +2,7 @@ import torch
 import tqdm
 from sklearn.metrics import f1_score
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
-from data_util import z_norm
+from data_util import z_norm, assign_ports_batch
 from models import GINe, PNA, GATe, RGCN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
@@ -12,6 +12,7 @@ import logging
 import time
 from torch_scatter import scatter
 import numpy as np
+import os
 
 def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
     #training
@@ -77,15 +78,16 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
         total_loss = total_examples = 0
         preds = []
         ground_truths = []
+        
+        assert model.training, "Training error: Model is not in training mode"
+
         for batch in tqdm.tqdm(tr_loader, disable=not args.tqdm):
             
             # s_time = time.time()
             # Add port numberings after neighborhood sampling. 
             if args.ports and args.ports_batch:
                 # To be consistent, sample the edges for forward and backward edge types.
-                batch['node', 'rev_to', 'node'].edge_index = batch['node', 'to', 'node'].edge_index.flipud().detach().clone()
-                batch['node', 'rev_to', 'node'].e_id = batch['node', 'to', 'node'].e_id
-                batch.add_ports()
+                assign_ports_batch(batch) 
             
             optimizer.zero_grad()
             #select the seed edges from which the batch was created
@@ -133,6 +135,7 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
         wandb.log({"f1/validation": val_f1}, step=epoch)
         wandb.log({"f1/test": te_f1}, step=epoch)
+        wandb.log({"Loss": total_loss/total_examples}, step=epoch)
         logging.info(f'Validation F1: {val_f1:.4f}')
         logging.info(f'Test F1: {te_f1:.4f}')
 
@@ -211,6 +214,13 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
         }
     )
 
+    wandb.run.log_code(
+                ".",
+                include_fn=lambda path: path.endswith(".py") or path.endswith(".yaml") or path.endswith(".sh"),
+                exclude_fn=lambda path, root: os.path.relpath(path, root).startswith("cache/"),
+            )
+            
+
     config = wandb.config
 
     #set the transform if ego ids should be used
@@ -258,6 +268,9 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
 
     if args.flatten_edges:
         sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
+    else:
+        sample_simp_edge_batch = None
+
     logging.info(summary(model, sample_x, sample_edge_index, sample_edge_attr, sample_simp_edge_batch))
     
     loss_fn = torch.nn.CrossEntropyLoss(weight=torch.FloatTensor([config.w_ce1, config.w_ce2]).to(device))

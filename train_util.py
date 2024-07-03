@@ -6,6 +6,7 @@ from torch_geometric.data import Data, HeteroData
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import f1_score
 import json
+from data_util import assign_ports_batch
 
 class AddEgoIds(BaseTransform):
     r"""Add IDs to the centre nodes of the batch.
@@ -145,10 +146,18 @@ def evaluate_homo(loader, inds, model, data, device, args):
 @torch.no_grad()
 def evaluate_hetero(loader, inds, model, data, device, args):
     '''Evaluates the model performane for heterogenous graph data.'''
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
+
     preds = []
     ground_truths = []
     for batch in tqdm.tqdm(loader, disable=not args.tqdm):
         #select the seed edges from which the batch was created
+        
+        if args.ports and args.ports_batch:
+            # To be consistent, sample the edges for forward and backward edge types.
+            assign_ports_batch(batch) 
+    
         inds = inds.detach().cpu()
         batch_edge_inds = inds[batch['node', 'to', 'node'].input_id.detach().cpu()]
         batch_edge_ids = loader.data['node', 'to', 'node'].edge_attr.detach().cpu()[batch_edge_inds, 0]
@@ -158,6 +167,7 @@ def evaluate_hetero(loader, inds, model, data, device, args):
         missing = ~torch.isin(batch_edge_ids, batch['node', 'to', 'node'].edge_attr[:, 0].detach().cpu())
 
         if missing.sum() != 0 and (args.data == 'Small_J' or args.data == 'Small_Q'):
+            # Just ignore this part we rae not entering here args.data == "Small_HI"
             missing_ids = batch_edge_ids[missing].int()
             n_ids = batch['node'].n_id
             add_edge_index = data['node', 'to', 'node'].edge_index[:, missing_ids].detach().clone()
@@ -192,6 +202,7 @@ def evaluate_hetero(loader, inds, model, data, device, args):
     ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
     f1 = f1_score(ground_truth, pred)
 
+    model.train()
     return f1
 
 def save_model(model, optimizer, epoch, args, data_config):
