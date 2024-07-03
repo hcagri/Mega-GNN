@@ -18,7 +18,7 @@ class MultiEdgeAggModule(nn.Module):
         _, inverse_indices = torch.unique(simp_edge_batch, return_inverse=True)
         new_edge_index = scatter(edge_index, inverse_indices, dim=1, reduce='mean')
         new_edge_attr = self.agg(x=edge_attr, index=inverse_indices)
-        return new_edge_index, new_edge_attr
+        return new_edge_index, new_edge_attr, inverse_indices
     
     def reset_parameters(self):
         self.agg.reset_parameters()
@@ -38,6 +38,7 @@ class GINe(torch.nn.Module):
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
 
         self.edge_agg = MultiEdgeAggModule()
+        self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)
 
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
@@ -47,7 +48,10 @@ class GINe(torch.nn.Module):
                 nn.Linear(self.n_hidden, self.n_hidden), 
                 nn.ReLU(), 
                 nn.Linear(self.n_hidden, self.n_hidden)
-                ), edge_dim=self.n_hidden)
+                ), 
+                edge_dim=self.n_hidden, 
+                aggr = self.node_agg # Added New!!!
+                )
             if self.edge_updates: self.emlps.append(nn.Sequential(
                 nn.Linear(3 * self.n_hidden, self.n_hidden),
                 nn.ReLU(),
@@ -68,12 +72,15 @@ class GINe(torch.nn.Module):
 
         for i in range(self.num_gnn_layers):
             if self.flatten_edges:
-                n_edge_index, n_edge_attr  = self.edge_agg(edge_index, edge_attr, simp_edge_batch)
+                n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch)
                 x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
+                if self.edge_updates: 
+                    remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices)
+                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], remapped_edge_attr, edge_attr], dim=-1)) / 2
             else:
                 x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
-            if self.edge_updates: 
-                edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+                if self.edge_updates: 
+                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
 
         x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
         x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
