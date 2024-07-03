@@ -193,8 +193,8 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
     data['node', 'rev_to', 'node'].edge_attr = edge_attr
 
     if args.flatten_edges:
-        data['node', 'to', 'node'].edge_attr = simp_edge_batch
-        data['node', 'rev_to', 'node'].edge_attr = simp_edge_batch
+        data['node', 'to', 'node'].simp_edge_batch = simp_edge_batch
+        data['node', 'rev_to', 'node'].simp_edge_batch = simp_edge_batch
 
     if args.ports and not args.ports_batch:
         #swap the in- and outgoing port numberings for the reverse edges
