@@ -28,15 +28,16 @@ py::array_t<int> ports(py::array_t<int> edge_index, const AdjList& adj_list) {
     auto ports_r = ports_array.mutable_unchecked<1>();
 
     std::vector<Triplet> sorted_nbs;
-    std::unordered_map<int, int> mapping;
     
     // Iterate over adjacency list and create port mappings
     for (const auto& [v, nbs] : adj_list) {
-        // if (nbs.empty()) continue;
+        if (nbs.empty()) continue;
 
+        std::unordered_map<int, int> mapping;
         int counter = 0;
-        // Sort neighbors by the second element (time)
         sorted_nbs = nbs;
+        
+        // Sort neighbors by the second element (time)
         std::sort(sorted_nbs.begin(), sorted_nbs.end(), [](const Triplet& a, const Triplet& b) {
             return a.second < b.second;
         });
