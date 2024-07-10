@@ -2,12 +2,37 @@ import torch
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.typing import OptTensor
 import numpy as np
-import ports as cython_ports
+import ports as cython_ports #type: ignore
 import multiprocessing as mp
 import pandas as pd
+import ports_cpp
+
+def assign_ports_with_cpp(graph):
+    if isinstance(graph, HeteroGraphData):
+        '''
+            If we have a Hetero Graph then merge the edge indices of forward and reverse edges for consistent port_id assignment.
+        '''
+        edge_index = torch.cat([graph['node', 'to', 'node'].edge_index, graph['node', 'rev_to', 'node'].edge_index], dim=1)
+        timestamp = torch.cat([graph['node', 'to', 'node'].timestamps, graph['node', 'rev_to', 'node'].timestamps], dim=0)
+    else:
+        edge_index = graph.edge_index
+        timestamp = graph.timestamp
+
+    edges = torch.cat([edge_index.T, timestamp.reshape((-1,1))], dim=1).numpy().astype('int')
+    ports_1, ports_2 = ports_cpp.assign_ports(edges,edge_index.numpy().astype('int'), graph.num_nodes)
+    ports_arr = torch.stack([torch.tensor(ports_1), torch.tensor(ports_2)], dim=1)
+
+    if isinstance(graph, HeteroGraphData):
+        cut_point = graph['node', 'to', 'node'].num_edges
+        graph['node', 'to', 'node'].edge_attr = torch.cat([graph['node', 'to', 'node'].edge_attr, ports_arr[:cut_point, :]], dim=1)
+        graph['node', 'rev_to', 'node'].edge_attr = torch.cat([graph['node', 'rev_to', 'node'].edge_attr, ports_arr[cut_point:, :]], dim=1)
+    else:
+        graph.edge_attr = torch.cat([graph.edge_attr, ports_arr], dim=1)
+    
+    return
 
 
-def process_ports(df, direction = ['source', 'target']):
+def _process_ports_cython(df, direction = ['source', 'target']):
         df = df.sort_values([direction[1], 't'])
         n_edges = df.shape[0]
         ports = np.zeros((n_edges, ), dtype=np.int32)
@@ -30,7 +55,7 @@ def assign_ports_batch(graph):
     df = pd.DataFrame(torch.cat([edge_index.T, timestamp.reshape((-1,1))], dim=1).numpy().astype('int'), columns=['source', 'target', 't'])
 
     with mp.Pool(2) as pool:
-        ports_1, ports_2 = pool.starmap(process_ports, [
+        ports_1, ports_2 = pool.starmap(_process_ports_cython, [
             (df, ['source', 'target']),
             (df, ['target', 'source'])
         ])
@@ -201,6 +226,7 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
         data['node', 'rev_to', 'node'].edge_attr[:, [-1, -2]] = data['node', 'rev_to', 'node'].edge_attr[:, [-2, -1]]
     data['node', 'to', 'node'].y = y
     data['node', 'to', 'node'].timestamps = timestamps
+    data['node', 'rev_to', 'node'].timestamps = timestamps
     
     return data
 
