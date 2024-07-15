@@ -2,17 +2,17 @@ import torch
 import tqdm
 from sklearn.metrics import f1_score
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
-from data_util import z_norm, assign_ports_batch
+from data_util import z_norm, assign_ports_batch, assign_ports_with_cpp
 from models import GINe, PNA, GATe, RGCN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
 from torch_geometric.utils import degree
 import wandb
 import logging
-import time
 from torch_scatter import scatter
 import numpy as np
 import os
+import time
 
 def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
     #training
@@ -83,11 +83,10 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
         for batch in tqdm.tqdm(tr_loader, disable=not args.tqdm):
             
-            # s_time = time.time()
-            # Add port numberings after neighborhood sampling. 
+            ''' Add port numberings after neighborhood sampling. ''' 
             if args.ports and args.ports_batch:
                 # To be consistent, sample the edges for forward and backward edge types.
-                assign_ports_batch(batch) 
+                assign_ports_with_cpp(batch) 
             
             optimizer.zero_grad()
             #select the seed edges from which the batch was created
@@ -119,9 +118,6 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
             total_loss += float(loss) * pred.numel()
             total_examples += pred.numel()
-
-            # e_time = time.time()
-            # print(f"Batch process time: {e_time-s_time:.4f}, Loss: {loss.item()}")
             
         pred = torch.cat(preds, dim=0).detach().cpu().numpy()
         ground_truth = torch.cat(ground_truths, dim=0).detach().cpu().numpy()
@@ -157,7 +153,8 @@ def get_model(sample_batch, config, args):
         model = GINe(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
                 n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
-                dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges
+                dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges,
+                edge_agg_type = args.edge_agg_type, node_agg_type=args.node_agg_type
                 )
     elif args.model == "gat":
         model = GATe(
@@ -195,7 +192,7 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     wandb.init(
         mode="disabled" if args.testing else "online",
         project="your_proj_name", #replace this with your wandb project name if you want to use wandb logging
-
+        entity="hcbilgi",
         config={
             "epochs": args.n_epochs,
             "batch_size": args.batch_size,

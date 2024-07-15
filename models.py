@@ -9,14 +9,48 @@ from genagg import GenAgg
 from genagg.MLPAutoencoder import MLPAutoencoder
 
 
-class MultiEdgeAggModule(nn.Module):
+class IdentityAgg(nn.Module):
     def __init__(self):
         super().__init__()
-        self.agg = GenAgg(f=MLPAutoencoder, jit=False)
+    def forward(self, x, index):
+        return x
+
+class GinAgg(nn.Module):
+    def __init__(self, n_hidden):
+        super().__init__()
+        self.nn = nn.Sequential(
+                nn.Linear(n_hidden, n_hidden), 
+                nn.ReLU(), 
+                nn.Linear(n_hidden, n_hidden)
+                )
+    def forward(self, x, index):
+        out = torch.relu(x)
+        out = scatter(x, index, dim=0, reduce='sum')
+        return self.nn(out)
+
+class SumAgg(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x, index):
+        return scatter(x, index, dim=0, reduce='sum')
+
+class MultiEdgeAggModule(nn.Module):
+    def __init__(self, n_hidden=None, agg_type=None):
+        super().__init__()
+        self.agg_type = agg_type
+
+        if agg_type == 'genagg':
+            self.agg = GenAgg(f=MLPAutoencoder, jit=False)
+        elif agg_type == 'gin':
+            self.agg = GinAgg(n_hidden=n_hidden)
+        elif agg_type == 'sum':
+            self.agg = SumAgg()
+        else:
+            self.agg = IdentityAgg()
         
     def forward(self, edge_index, edge_attr, simp_edge_batch):
         _, inverse_indices = torch.unique(simp_edge_batch, return_inverse=True)
-        new_edge_index = scatter(edge_index, inverse_indices, dim=1, reduce='mean')
+        new_edge_index = scatter(edge_index, inverse_indices, dim=1, reduce='mean') if self.agg_type is not None else edge_index
         new_edge_attr = self.agg(x=edge_attr, index=inverse_indices)
         return new_edge_index, new_edge_attr, inverse_indices
     
@@ -26,7 +60,7 @@ class MultiEdgeAggModule(nn.Module):
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                 n_hidden=100, edge_updates=False, residual=True, 
-                edge_dim=None, dropout=0.0, final_dropout=0.5, flatten_edges=False):
+                edge_dim=None, dropout=0.0, final_dropout=0.5, flatten_edges=False, edge_agg_type=None, node_agg_type=None):
         super().__init__()
         self.n_hidden = n_hidden
         self.num_gnn_layers = num_gnn_layers
@@ -37,8 +71,12 @@ class GINe(torch.nn.Module):
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
 
-        self.edge_agg = MultiEdgeAggModule()
-        self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)
+        self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=edge_agg_type)
+
+        if node_agg_type == 'genagg':
+            self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)
+        elif node_agg_type == 'sum':
+            self.node_agg = 'sum'
 
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()

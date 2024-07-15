@@ -30,6 +30,8 @@ def create_parser():
     parser.add_argument("--ports_batch", action='store_true', help="Use port numberings in GNN training but compute port numbers after neighborhood sampling.")
     parser.add_argument("--tds", action='store_true', help="Use time deltas (i.e. the time between subsequent transactions) in GNN training")
     parser.add_argument("--ego", action='store_true', help="Use ego IDs in GNN training")
+    parser.add_argument("--edge_agg_type", default=None, type=str, help="Select the aggregation method on parallel edges")
+    parser.add_argument("--node_agg_type", default='sum', type=str, help="Select the aggregation method on parallel edges")
 
     #Model parameters
     parser.add_argument("--batch_size", default=8192, type=int, help="Select the batch size for GNN training")
