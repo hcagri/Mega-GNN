@@ -1,12 +1,39 @@
 import torch.nn as nn
 from torch_geometric.nn import GINEConv, BatchNorm, Linear, GATConv, PNAConv, RGCNConv
+from torch_geometric.nn.aggr import DegreeScalerAggregation
 import torch.nn.functional as F
 import torch
 import logging
 import numpy as np
 from torch_scatter import scatter
+from torch_geometric.utils import degree
 from genagg import GenAgg
 from genagg.MLPAutoencoder import MLPAutoencoder
+
+
+
+class PnaAgg(nn.Module):
+    def __init__(self , n_hidden, deg):
+        super().__init__()
+        
+        aggregators = ['mean', 'min', 'max', 'std']
+        self.num_aggregators = len(aggregators)
+        scalers = ['identity', 'amplification', 'attenuation']
+
+        self.agg = DegreeScalerAggregation(aggregators, scalers, deg)
+        self.lin = nn.Linear(len(scalers)*len(aggregators)*n_hidden, n_hidden)
+
+    def forward(self, x, index):
+        out = self.agg(x, index)
+        return self.lin(out)
+
+    def reset_parameters(self):
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                param = nn.init.kaiming_normal_(param.detach())
+            elif 'bias' in name:
+                param = nn.init.constant_(param.detach(), 0)
+        
 
 
 class IdentityAgg(nn.Module):
@@ -35,7 +62,7 @@ class SumAgg(nn.Module):
         return scatter(x, index, dim=0, reduce='sum')
 
 class MultiEdgeAggModule(nn.Module):
-    def __init__(self, n_hidden=None, agg_type=None):
+    def __init__(self, n_hidden=None, agg_type=None, index=None):
         super().__init__()
         self.agg_type = agg_type
 
@@ -43,6 +70,10 @@ class MultiEdgeAggModule(nn.Module):
             self.agg = GenAgg(f=MLPAutoencoder, jit=False)
         elif agg_type == 'gin':
             self.agg = GinAgg(n_hidden=n_hidden)
+        elif agg_type == 'pna':
+            d = degree(index, dtype=torch.long)
+            deg = torch.bincount(d, minlength=1)[1:] # discard the value count for 0
+            self.agg = PnaAgg(n_hidden=n_hidden, deg=deg)
         elif agg_type == 'sum':
             self.agg = SumAgg()
         else:
@@ -60,7 +91,8 @@ class MultiEdgeAggModule(nn.Module):
 class GINe(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
                 n_hidden=100, edge_updates=False, residual=True, 
-                edge_dim=None, dropout=0.0, final_dropout=0.5, flatten_edges=False, edge_agg_type=None, node_agg_type=None):
+                edge_dim=None, dropout=0.0, final_dropout=0.5, flatten_edges=False, 
+                edge_agg_type=None, node_agg_type=None, index_ = None):
         super().__init__()
         self.n_hidden = n_hidden
         self.num_gnn_layers = num_gnn_layers
@@ -71,7 +103,7 @@ class GINe(torch.nn.Module):
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
 
-        self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=edge_agg_type)
+        self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=edge_agg_type, index=index_)
 
         if node_agg_type == 'genagg':
             self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)

@@ -148,13 +148,13 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 def get_model(sample_batch, config, args):
     n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
     e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
-
+    index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
     if args.model == "gin":
         model = GINe(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
                 n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
                 dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges,
-                edge_agg_type = args.edge_agg_type, node_agg_type=args.node_agg_type
+                edge_agg_type = args.edge_agg_type, node_agg_type=args.node_agg_type, index_=index_
                 )
     elif args.model == "gat":
         model = GATe(
