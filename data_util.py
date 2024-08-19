@@ -171,6 +171,11 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
     data = HeteroGraphData()
 
     data['node'].x = x
+
+    if args.data != "ETH":
+        data['node', 'to', 'node'].y = y
+    else:
+        data['node'].y = y
     data['node', 'to', 'node'].edge_index = edge_index
     data['node', 'rev_to', 'node'].edge_index = edge_index.flipud()
     data['node', 'to', 'node'].edge_attr = edge_attr
@@ -183,7 +188,6 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
     if args.ports and not args.ports_batch:
         #swap the in- and outgoing port numberings for the reverse edges
         data['node', 'rev_to', 'node'].edge_attr[:, [-1, -2]] = data['node', 'rev_to', 'node'].edge_attr[:, [-2, -1]]
-    data['node', 'to', 'node'].y = y
     data['node', 'to', 'node'].timestamps = timestamps
     data['node', 'rev_to', 'node'].timestamps = timestamps
     

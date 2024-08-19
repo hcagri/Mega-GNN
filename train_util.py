@@ -6,7 +6,7 @@ from torch_geometric.data import Data, HeteroData
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import f1_score
 import json
-from data_util import assign_ports_batch
+from data_util import assign_ports_with_cpp
 
 class AddEgoIds(BaseTransform):
     r"""Add IDs to the centre nodes of the batch.
@@ -156,7 +156,7 @@ def evaluate_hetero(loader, inds, model, data, device, args):
         
         if args.ports and args.ports_batch:
             # To be consistent, sample the edges for forward and backward edge types.
-            assign_ports_batch(batch) 
+            assign_ports_with_cpp(batch) 
     
         inds = inds.detach().cpu()
         batch_edge_inds = inds[batch['node', 'to', 'node'].input_id.detach().cpu()]
