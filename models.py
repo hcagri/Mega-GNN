@@ -11,7 +11,6 @@ from genagg import GenAgg
 from genagg.MLPAutoencoder import MLPAutoencoder
 
 
-
 class PnaAgg(nn.Module):
     def __init__(self , n_hidden, deg):
         super().__init__()

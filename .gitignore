@@ -6,6 +6,7 @@ sample_data/
 *.pyc
 *.pyo
 *.pyd
+*.ipynb
 
 # Ignore __pycache__ directories
 __pycache__/

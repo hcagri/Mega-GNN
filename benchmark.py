@@ -85,15 +85,15 @@ def method3():
 
 
 def benchmark():
-    num_runs = 3  # Number of times to run each method to get a reliable average
+    num_runs = 5  # Number of times to run each method to get a reliable average
     
     time1 = timeit.timeit(method1, number=num_runs)
-    time2 = timeit.timeit(method2, number=num_runs)
-    time3 = timeit.timeit(method3, number=num_runs)
+    # time2 = timeit.timeit(method2, number=num_runs)
+    # time3 = timeit.timeit(method3, number=num_runs)
 
     print(f"{'C++ average time:':30} {time1 / num_runs:.6f} seconds")
-    print(f"{'Pure Python average time:':30} {time2 / num_runs:.6f} seconds")
-    print(f"{'Python + Cython average time:':30} {time3 / num_runs:.6f} seconds")
+    # print(f"{'Pure Python average time:':30} {time2 / num_runs:.6f} seconds")
+    # print(f"{'Python + Cython average time:':30} {time3 / num_runs:.6f} seconds")
 
 if __name__ == "__main__":
     graph = torch.load('sample_data/batch.pth')
