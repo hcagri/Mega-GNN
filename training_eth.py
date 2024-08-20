@@ -2,7 +2,7 @@ import torch
 from typing import Union
 import tqdm
 from sklearn.metrics import f1_score
-from train_util import extract_param, add_arange_ids, evaluate_homo, evaluate_hetero, save_model, load_model
+from train_util import extract_param, save_model, load_model
 from data_util import z_norm, assign_ports_with_cpp
 from models import GINe, PNA, GATe, RGCN
 from torch_geometric.data import Data, HeteroData
@@ -12,10 +12,7 @@ from torch_geometric.utils import degree
 from torch_geometric.loader import NeighborLoader
 import wandb
 import logging
-from torch_scatter import scatter
-import numpy as np
 import os
-import time
 
 
 def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
@@ -36,16 +33,16 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
                 assign_ports_with_cpp(batch) 
             
             optimizer.zero_grad()
-            #select the seed edges from which the batch was created
 
+            # select the seed nodes (previously edges) from which the batch was created
+            # This will correspond to the first batch_size nodes, which are the seed nodes.
             inds = tr_inds.detach().cpu()
-            batch_edge_inds = inds[batch['node', 'to', 'node'].input_id.detach().cpu()]
-            batch_edge_ids = tr_loader.data['node', 'to', 'node'].edge_attr.detach().cpu()[batch_edge_inds, 0]
-            mask = torch.isin(batch['node', 'to', 'node'].edge_attr[:, 0].detach().cpu(), batch_edge_ids)
+            batch_node_inds = inds[batch['node'].input_id.detach().cpu()]
+            batch_node_ids = tr_loader.data['node'].x.detach().cpu()[batch_node_inds, 0]
+            mask = torch.isin(batch['node'].x[:, 0].detach().cpu(), batch_node_ids)
             
-            #remove the unique edge id from the edge features, as it's no longer needed
-            batch['node', 'to', 'node'].edge_attr = batch['node', 'to', 'node'].edge_attr[:, 1:]
-            batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
+            #remove the unique node id from the node features, as it's no longer needed
+            batch['node'].x = batch['node'].x[:, 1:]
 
             batch.to(device)
             if args.flatten_edges:
@@ -53,11 +50,11 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
             else:
                 out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
-            out = out[('node', 'to', 'node')]
+            out = out[('node')]
             pred = out[mask]
-            ground_truth = batch['node', 'to', 'node'].y[mask]
+            ground_truth = batch['node'].y[mask]
             preds.append(pred.argmax(dim=-1))
-            ground_truths.append(batch['node', 'to', 'node'].y[mask])
+            ground_truths.append(batch['node'].y[mask])
             loss = loss_fn(pred, ground_truth)
 
             loss.backward()
@@ -92,7 +89,60 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
         
     return model
 
+@torch.no_grad()
+def evaluate_hetero(loader, inds, model, data, device, args):
+    '''Evaluates the model performane for heterogenous graph data.'''
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
+
+    preds = []
+    ground_truths = []
+    for batch in tqdm.tqdm(loader, disable=not args.tqdm):
+        #select the seed edges from which the batch was created
+        
+        if args.ports and args.ports_batch:
+            assign_ports_with_cpp(batch) 
+    
+        inds = inds.detach().cpu()
+        batch_node_inds = inds[batch['node'].input_id.detach().cpu()]
+        batch_node_ids = loader.data['node'].x.detach().cpu()[batch_node_inds, 0]
+        mask = torch.isin(batch['node'].x[:, 0].detach().cpu(), batch_node_ids)
+
+        #remove the unique node id from the node features, as it's no longer needed
+        batch['node'].x = batch['node'].x[:, 1:]
+        
+        with torch.no_grad():
+            batch.to(device)
+            if args.flatten_edges:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
+            else:
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+                
+            out = out[('node')]
+            out = out[mask]
+            pred = out.argmax(dim=-1)
+            preds.append(pred)
+            ground_truths.append(batch['node'].y[mask])
+    pred = torch.cat(preds, dim=0).cpu().numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
+    f1 = f1_score(ground_truth, pred)
+
+    model.train()
+    return f1
+
 def get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args):
+    ''' 
+        Sampled nodes are sorted based on the order in which they were sampled. In particular, the first batch_size nodes represent 
+        the set of original mini-batch nodes.
+
+        In particular, the data loader will add the following attributes to the returned mini-batch:
+            `batch_size`        The number of seed nodes (first nodes in the batch)
+            `n_id`              The global node index for every sampled node
+            `e_id`              The global edge index for every sampled edge
+            `input_id`          The global index of the input_nodes
+            `num_sampled_nodes` The number of sampled nodes in each hop
+            `num_sampled_edges` The number of sampled edges in each hop
+    '''
     if isinstance(tr_data, HeteroData):
 
         tr_loader = NeighborLoader(tr_data, 
@@ -144,6 +194,20 @@ def get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, tran
     return tr_loader, val_loader, te_loader
 
 
+def add_arange_ids(data_list):
+    '''
+    Add the index as an id to the node features to find seed nodes in training, validation and testing.
+
+    Args:
+    - data_list (str): List of tr_data, val_data and te_data.
+    '''
+    for data in data_list:
+        if isinstance(data, HeteroData):
+            data['node'].x = torch.cat([torch.arange(data['node'].x.shape[0]).view(-1, 1), data['node'].x.view(-1,1)], dim=1)
+        else:
+            data.x = torch.cat([torch.arange(data.x.shape[0]).view(-1, 1), data.x.view(-1,1)], dim=1)
+
+
 class AddEgoIds(BaseTransform):
     r"""Add IDs to the centre nodes of the batch.
     """
@@ -162,13 +226,14 @@ class AddEgoIds(BaseTransform):
         if not isinstance(data, HeteroData):
             data.x = torch.cat([x.view(-1, 1), ids], dim=1)
         else: 
-            data['node'].x = torch.cat([x.view(-1, 1), ids], dim=1)
+            # data['node'].x = torch.cat([x.view(-1, 1), ids], dim=1)
+            data['node'].x = torch.cat([x, ids], dim=1)
         
         return data
 
 def get_model(sample_batch, config, args):
-    n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
-    e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
+    n_feats = (sample_batch.x.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node'].x.shape[1] - 1)
+    e_dim = sample_batch.edge_attr.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].edge_attr.shape[1]
     index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
     if args.model == "gin":
         model = GINe(
@@ -247,11 +312,13 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     else:
         transform = None
 
+    #add the unique ids to later find the seed edges
+    add_arange_ids([tr_data, val_data, te_data])
 
     tr_loader, val_loader, te_loader = get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args)
 
     #get the model
-    sample_batch = next(iter(tr_loader))
+    sample_batch = next(iter(tr_loader)) 
 
     if args.ports and args.ports_batch:
         # Add a placeholder for the port features so that the model is loaded correctly!
@@ -273,13 +340,14 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     
     sample_batch.to(device)
+
+    if isinstance(sample_batch, HeteroData):
+        sample_batch['node'].x = sample_batch['node'].x[:, 1:]
+    else:
+        sample_batch.x = sample_batch.x[:, 1:]
+
     sample_x = sample_batch.x if not isinstance(sample_batch, HeteroData) else sample_batch.x_dict
     sample_edge_index = sample_batch.edge_index if not isinstance(sample_batch, HeteroData) else sample_batch.edge_index_dict
-    if isinstance(sample_batch, HeteroData):
-        sample_batch['node', 'to', 'node'].edge_attr = sample_batch['node', 'to', 'node'].edge_attr[:, 1:]
-        sample_batch['node', 'rev_to', 'node'].edge_attr = sample_batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
-    else:
-        sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
     sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
 
     if args.flatten_edges:
