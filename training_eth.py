@@ -46,7 +46,7 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
 
             batch.to(device)
             if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict, batch.timestamp_dict)
             else:
                 out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
@@ -234,7 +234,11 @@ class AddEgoIds(BaseTransform):
 def get_model(sample_batch, config, args):
     n_feats = (sample_batch.x.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node'].x.shape[1] - 1)
     e_dim = sample_batch.edge_attr.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].edge_attr.shape[1]
-    index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
+    try:
+        index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
+    except:
+        index_ = None
+
     if args.model == "gin":
         model = GINe(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,

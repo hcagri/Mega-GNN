@@ -1,6 +1,7 @@
 import torch.nn as nn
 from torch_geometric.nn import GINEConv, BatchNorm, Linear, GATConv, PNAConv, RGCNConv
 from torch_geometric.nn.aggr import DegreeScalerAggregation
+from torch_geometric.utils import to_dense_batch
 import torch.nn.functional as F
 import torch
 import logging
@@ -9,7 +10,97 @@ from torch_scatter import scatter
 from torch_geometric.utils import degree
 from genagg import GenAgg
 from genagg.MLPAutoencoder import MLPAutoencoder
+import math 
 
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+    
+class TransformerAgg(nn.Module):
+    def __init__(self, d_model = 66):
+        super().__init__()
+
+        self.pos_enc = PositionalEncoding(d_model=d_model, dropout=0.05, max_len=128)
+        self.trans_enc = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=2, 
+            dim_feedforward=128, 
+            batch_first=True, # If True, then the input and output tensors are provided as (batch, seq, feature). 
+            norm_first=True
+            )
+
+    def forward(self, x, index, timestamps):
+        timestamps[timestamps == 0] = 0.001  #just to make it larger than 0
+        # Add timestamps to the edge features to be able to sort according to them
+        x = torch.cat([timestamps.view(-1, 1), x], dim=1)
+        
+        sort_ids = torch.argsort(index)
+        dense_edge_feats, mask = to_dense_batch(x[sort_ids, :], index[sort_ids])
+        sorted_dense_edge_feats, sorted_mask = self.sort_wrt_time(dense_edge_feats, mask)
+
+        sorted_dense_edge_feats = self.pos_enc(sorted_dense_edge_feats.permute(1,0,2)).permute(1,0,2)
+        sorted_dense_edge_feats = self.trans_enc(sorted_dense_edge_feats, src_key_padding_mask = sorted_mask)
+
+        return sorted_dense_edge_feats.mean(dim=1).squeeze()
+
+    def sort_wrt_time(self, matt, mask):
+        first_feature = matt[:, :, 0] 
+        sort_indices = torch.argsort(first_feature, dim=1)
+        sorted_matt = torch.gather(matt, 1, sort_indices.unsqueeze(-1).expand(-1, -1, matt.shape[-1]))
+        sorted_mask = torch.gather(mask, 1, sort_indices)
+        return sorted_matt[:, :, 1:], sorted_mask
+
+class GRUAgg(nn.Module):
+    def __init__(self, d_model = 66):
+        super().__init__()
+
+        self.gru = nn.GRU(
+            d_model, 
+            hidden_size=d_model, 
+            num_layers=2, 
+            batch_first=True
+            )
+
+    def forward(self, x, index, timestamps):
+        timestamps[timestamps == 0] = 0.001  #just to make it larger than 0
+        # Add timestamps to the edge features to be able to sort according to them
+        x = torch.cat([timestamps.view(-1, 1), x], dim=1)
+        
+        sort_ids = torch.argsort(index)
+        dense_edge_feats, mask = to_dense_batch(x[sort_ids, :], index[sort_ids])
+        sorted_dense_edge_feats, sorted_mask = self.sort_wrt_time(dense_edge_feats, mask)
+
+        sorted_dense_edge_feats = self.gru(sorted_dense_edge_feats)[0]
+        sorted_dense_edge_feats[~sorted_mask.unsqueeze(-1).expand(-1, -1, sorted_dense_edge_feats.shape[-1])] = 0
+
+        return sorted_dense_edge_feats.mean(dim=1).squeeze()
+
+    def sort_wrt_time(self, matt, mask):
+        first_feature = matt[:, :, 0] 
+        sort_indices = torch.argsort(first_feature, dim=1)
+        sorted_matt = torch.gather(matt, 1, sort_indices.unsqueeze(-1).expand(-1, -1, matt.shape[-1]))
+        sorted_mask = torch.gather(mask, 1, sort_indices)
+        return sorted_matt[:, :, 1:], sorted_mask
+    
+    
 
 class PnaAgg(nn.Module):
     def __init__(self , n_hidden, deg):
@@ -75,13 +166,17 @@ class MultiEdgeAggModule(nn.Module):
             self.agg = PnaAgg(n_hidden=n_hidden, deg=deg)
         elif agg_type == 'sum':
             self.agg = SumAgg()
+        elif agg_type == 'transformer':
+            self.agg = TransformerAgg(d_model=n_hidden)
+        elif agg_type == 'gru':
+            self.agg = GRUAgg(d_model=n_hidden)
         else:
             self.agg = IdentityAgg()
         
-    def forward(self, edge_index, edge_attr, simp_edge_batch):
+    def forward(self, edge_index, edge_attr, simp_edge_batch, timestamps=None):
         _, inverse_indices = torch.unique(simp_edge_batch, return_inverse=True)
         new_edge_index = scatter(edge_index, inverse_indices, dim=1, reduce='mean') if self.agg_type is not None else edge_index
-        new_edge_attr = self.agg(x=edge_attr, index=inverse_indices)
+        new_edge_attr = self.agg(x=edge_attr, index=inverse_indices, timestamps=timestamps)
         return new_edge_index, new_edge_attr, inverse_indices
     
     def reset_parameters(self):
@@ -137,7 +232,7 @@ class GINe(torch.nn.Module):
             self.mlp = nn.Sequential(Linear(n_hidden, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
                                 Linear(25, n_classes))
 
-    def forward(self, x, edge_index, edge_attr, simp_edge_batch=None):
+    def forward(self, x, edge_index, edge_attr, simp_edge_batch=None, timestamps=None):
 
         src, dst = edge_index
 
@@ -146,10 +241,10 @@ class GINe(torch.nn.Module):
 
         for i in range(self.num_gnn_layers):
             if self.flatten_edges:
-                n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch)
+                n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch, timestamps)
                 x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
                 if self.edge_updates: 
-                    remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices)
+                    remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices) # artificall node attributes 
                     edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], remapped_edge_attr, edge_attr], dim=-1)) / 2
             else:
                 x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2

@@ -102,7 +102,7 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
             batch.to(device)
             if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict, batch.timestamp_dict)
             else:
                 out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
