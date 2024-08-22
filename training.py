@@ -33,6 +33,12 @@ def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, mod
             batch.edge_attr = batch.edge_attr[:, 1:]
 
             batch.to(device)
+
+            if args.flatten_edges:
+                out = model(batch.x, batch.edge_index, batch.edge_attr, batch.simp_edge_batch)
+            else:
+                out = model(batch.x, batch.edge_index, batch.edge_attr)
+
             out = model(batch.x, batch.edge_index, batch.edge_attr)
             pred = out[mask]
             ground_truth = batch.y[mask]
@@ -102,7 +108,7 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 
             batch.to(device)
             if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict, batch.timestamp_dict)
+                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
             else:
                 out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
@@ -262,6 +268,7 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     else:
         sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
     sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
+    # sample_timestamps = sample_batch.timestamps if not isinstance(sample_batch, HeteroData) else sample_batch.timestamps_dict
 
     if args.flatten_edges:
         sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
