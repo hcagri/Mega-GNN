@@ -307,7 +307,7 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
                 exclude_fn=lambda path, root: os.path.relpath(path, root).startswith("cache/"),
             )
             
-
+    args.unique_name = wandb.run.dir.split('/')[-2].split('-')[-1]
     config = wandb.config
 
     #set the transform if ego ids should be used

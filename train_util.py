@@ -6,6 +6,7 @@ from torch_geometric.data import Data, HeteroData
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import f1_score
 import json
+import os
 from data_util import assign_ports_with_cpp
 
 class AddEgoIds(BaseTransform):
@@ -207,11 +208,16 @@ def evaluate_hetero(loader, inds, model, data, device, args):
 
 def save_model(model, optimizer, epoch, args, data_config):
     # Save the model in a dictionary
+    if not os.path.exists(os.path.join(f'{data_config["paths"]["model_to_save"]}', args.unique_name)):
+        os.mkdir(os.path.join(f'{data_config["paths"]["model_to_save"]}', args.unique_name))
+
     torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict()
-                }, f'{data_config["paths"]["model_to_save"]}/checkpoint_{args.unique_name}{"" if not args.finetune else "_finetuned"}.tar')
+                }, 
+                os.path.join(f'{data_config["paths"]["model_to_save"]}', args.unique_name, f'epoch_{epoch+1}.tar')
+            )
     
 def load_model(model, device, args, config, data_config):
     checkpoint = torch.load(f'{data_config["paths"]["model_to_load"]}/checkpoint_{args.unique_name}.tar')
