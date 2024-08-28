@@ -268,10 +268,11 @@ class GINe(torch.nn.Module):
         self.final_dropout = final_dropout
         self.flatten_edges = flatten_edges
         self.args = args
+        self.edge_agg_type = edge_agg_type
 
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
-
+        
         self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=edge_agg_type, index=index_)
 
         if node_agg_type == 'genagg':
@@ -299,7 +300,7 @@ class GINe(torch.nn.Module):
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
 
-        if args.data != 'ETH':
+        if (args.data != 'ETH') and (args.data != 'ETH-Kaggle'):
             self.mlp = nn.Sequential(Linear(n_hidden*3, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
                                 Linear(25, n_classes))
         else:
@@ -307,27 +308,39 @@ class GINe(torch.nn.Module):
                                 Linear(25, n_classes))
 
     def forward(self, x, edge_index, edge_attr, simp_edge_batch=None):
-        
-        src, dst = edge_index
-
+        '''
+            Only for adamm architecture the 
+        '''
         times = edge_attr[:, 0].clone()
 
         x = self.node_emb(x)
         edge_attr = self.edge_emb(edge_attr)
 
-        for i in range(self.num_gnn_layers):
-            if self.flatten_edges:
-                n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
-                x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
-                if self.edge_updates: 
-                    remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices) # artificall node attributes 
-                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], remapped_edge_attr, edge_attr], dim=-1)) / 2
-            else:
+        if self.edge_agg_type == 'adamm':
+            # Apply the flattening at the beggining only.
+            edge_index, edge_attr, _ = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
+            src, dst = edge_index
+
+            for i in range(self.num_gnn_layers):
                 x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
                 if self.edge_updates: 
-                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2   
+        else:
+            src, dst = edge_index
 
-        if self.args.data != 'ETH':
+            for i in range(self.num_gnn_layers):
+                if self.flatten_edges:
+                    n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
+                    x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
+                    if self.edge_updates: 
+                        remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices) # artificall node attributes 
+                        edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], remapped_edge_attr, edge_attr], dim=-1)) / 2
+                else:
+                    x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
+                    if self.edge_updates: 
+                        edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+
+        if (self.args.data != 'ETH') and (self.args.data != 'ETH-Kaggle'):
             x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
             x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
         out = x

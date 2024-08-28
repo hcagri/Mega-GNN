@@ -290,3 +290,149 @@ def get_eth_data(args, data_config):
     logging.info(f'test data object: {te_data}')
 
     return tr_data, val_data, te_data, tr_inds, val_inds, te_inds
+
+
+
+def get_eth_kaggle_data(args, data_config):
+    '''Loads the ETH Phishing data.
+    
+    1. The data is loaded from the csv and the necessary features are chosen.
+    2. The data is split into training, validation and test data.
+    3. PyG Data objects are created with the respective data splits.
+    '''
+
+    nodes = pd.read_csv(f"{data_config['paths']['aml_data']}/{args.data}/nodes-kaggle.csv")
+    edges = pd.read_csv(f"{data_config['paths']['aml_data']}/{args.data}/edges-kaggle.csv")
+    nodes.drop('Unnamed: 0', axis=1, inplace=True)
+    edges.drop('Unnamed: 0', axis=1, inplace=True)
+
+    logging.info(f'Available Edge Features: {edges.columns.tolist()}')
+    logging.info(f"Number of Nodes: {nodes.shape[0]}")
+    logging.info(f"Number of Edges: {edges.shape[0]}")
+    logging.info(f"Number of Phishing Nodes: {nodes['label'].sum()}")
+    logging.info(f"Illicit Ratio: {nodes['label'].sum()/ nodes.shape[0] * 100 :.2f}%")
+
+    nodes = nodes.sort_values(by='first_transaction').reset_index(drop=True)
+
+    assign_dict = {}
+    for row in nodes.itertuples():
+        assign_dict[row[1]] = row[0]
+
+    def assign_node_ids(node_id):
+        return assign_dict[node_id] 
+
+    edges['to_address'] = edges['to_address'].apply(assign_node_ids)
+    edges['from_address'] = edges['from_address'].apply(assign_node_ids)
+    nodes.drop(columns=['node'], inplace=True)
+
+    edges['timestamp'] = edges['timestamp'] - edges['timestamp'].min()
+
+    edge_features = ['amount', 'timestamp']
+    node_features = ['Feature']
+
+    logging.info(f'Edge features being used: {edge_features}')
+    logging.info(f'Node features being used: {node_features} ("Feature" is a placeholder feature of all 1s)')
+
+    max_n_id = nodes.shape[0]
+
+    splits = [0.65, 0.15, 0.20]
+
+    t1 = nodes.iloc[int(max_n_id * splits[0])]['first_transaction']
+    t2 = nodes.iloc[int(max_n_id * (splits[0] + splits[1]))]['first_transaction']
+
+    tr_nodes = nodes.loc[nodes['first_transaction'] <= t1]
+    val_nodes = nodes.loc[nodes['first_transaction'] <= t2]
+    te_nodes = nodes
+
+    tr_nodes_max_id = tr_nodes.index[-1]
+    val_nodes_max_id = val_nodes.index[-1]
+    te_nodes_max_id = te_nodes.index[-1]
+
+    tr_inds = torch.arange(0, tr_nodes_max_id+1)
+    val_inds = torch.arange(tr_nodes_max_id+1, val_nodes_max_id+1)
+    te_inds = torch.arange(val_nodes_max_id+1, te_nodes_max_id+1)
+
+
+    logging.info(f"Total train samples: {tr_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{tr_nodes['label'].mean() * 100 :.2f}%")
+    logging.info(f"Total train samples: {val_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{val_nodes['label'].mean() * 100 :.2f}%")
+    logging.info(f"Total train samples: {te_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{te_nodes['label'].mean() * 100 :.2f}%")
+    
+
+    tr_nodes_max_id = tr_nodes.index[-1]
+    val_nodes_max_id = val_nodes.index[-1]
+    te_nodes_max_id = te_nodes.index[-1]
+
+    split_name = []
+    for row in edges.itertuples():
+        if row[1] <= tr_nodes_max_id and row[2] <= tr_nodes_max_id:
+            split_name.append('train')
+            continue
+        elif row[1] <= val_nodes_max_id and row[2] <= val_nodes_max_id:
+            split_name.append('val')
+        else:
+            split_name.append('test')
+
+
+    edges['split'] = split_name
+
+
+    tr_edges = edges.loc[edges['split'] == 'train']
+    val_edges = edges.loc[(edges['split'] == 'train') | (edges['split'] == 'val')]
+    te_edges = edges 
+
+    tr_x = torch.tensor(np.ones(tr_nodes.shape[0])).float()
+    tr_edge_index = torch.LongTensor(tr_edges.loc[:, ['from_address', 'to_address']].to_numpy().T)
+    tr_edge_attr = torch.tensor(tr_edges.loc[:, edge_features].to_numpy()).float()
+    tr_edge_times = torch.Tensor(tr_edges['timestamp'].to_numpy())
+    tr_y = torch.LongTensor(tr_nodes['label'].to_numpy())
+    tr_simp_edge_batch = find_parallel_edges(tr_edge_index)
+
+    val_x = torch.tensor(np.ones(val_nodes.shape[0])).float()
+    val_edge_index = torch.LongTensor(val_edges.loc[:, ['from_address', 'to_address']].to_numpy().T)
+    val_edge_attr = torch.tensor(val_edges.loc[:, edge_features].to_numpy()).float()
+    val_edge_times = torch.Tensor(val_edges['timestamp'].to_numpy())
+    val_y = torch.LongTensor(val_nodes['label'].to_numpy())
+    val_simp_edge_batch = find_parallel_edges(val_edge_index)
+
+    te_x = torch.tensor(np.ones(te_nodes.shape[0])).float()
+    te_edge_index = torch.LongTensor(te_edges.loc[:, ['from_address', 'to_address']].to_numpy().T)
+    te_edge_attr = torch.tensor(te_edges.loc[:, edge_features].to_numpy()).float()
+    te_edge_times = torch.Tensor(te_edges['timestamp'].to_numpy())
+    te_y = torch.LongTensor(te_nodes['label'].to_numpy())
+    te_simp_edge_batch = find_parallel_edges(te_edge_index)
+
+    if args.flatten_edges:
+        tr_data = GraphData (x=tr_x,  y=tr_y,  edge_index=tr_edge_index,  edge_attr=tr_edge_attr, timestamps=tr_edge_times , simp_edge_batch = tr_simp_edge_batch)
+        val_data = GraphData(x=val_x, y=val_y, edge_index=val_edge_index, edge_attr=val_edge_attr,timestamps=val_edge_times, simp_edge_batch = val_simp_edge_batch)
+        te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr, timestamps=te_edge_times , simp_edge_batch = te_simp_edge_batch)
+    else:
+        tr_data = GraphData (x=tr_x,  y=tr_y,  edge_index=tr_edge_index,  edge_attr=tr_edge_attr , timestamps=tr_edge_times )
+        val_data = GraphData(x=val_x, y=val_y, edge_index=val_edge_index, edge_attr=val_edge_attr, timestamps=val_edge_times)
+        te_data = GraphData (x=te_x,  y=te_y,  edge_index=te_edge_index,  edge_attr=te_edge_attr , timestamps=te_edge_times )
+
+
+    if args.ports and not args.ports_batch:
+        logging.info(f"Start: adding ports")
+        tr_data.add_ports()
+        val_data.add_ports()
+        te_data.add_ports()
+        logging.info(f"Done: adding ports")
+
+
+    tr_data.x, val_data.x, te_data.x = z_norm(tr_data.x), z_norm(val_data.x), z_norm(te_data.x)
+
+    tr_data.edge_attr, val_data.edge_attr, te_data.edge_attr = z_norm(tr_data.edge_attr), z_norm(val_data.edge_attr), z_norm(te_data.edge_attr)
+
+    if args.reverse_mp:
+        tr_data = create_hetero_obj(tr_data.x,  tr_data.y,  tr_data.edge_index,  tr_data.edge_attr, tr_data.timestamps, args, tr_simp_edge_batch)
+        val_data = create_hetero_obj(val_data.x,  val_data.y,  val_data.edge_index,  val_data.edge_attr, val_data.timestamps, args, val_simp_edge_batch)
+        te_data = create_hetero_obj(te_data.x,  te_data.y,  te_data.edge_index,  te_data.edge_attr, te_data.timestamps, args, te_simp_edge_batch)
+
+    logging.info(f'train data object: {tr_data}')
+    logging.info(f'validation data object: {val_data}')
+    logging.info(f'test data object: {te_data}')
+
+    return tr_data, val_data, te_data, tr_inds, val_inds, te_inds

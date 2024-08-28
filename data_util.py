@@ -15,7 +15,7 @@ def assign_ports_with_cpp(graph):
         timestamp = torch.cat([graph['node', 'to', 'node'].timestamps, graph['node', 'rev_to', 'node'].timestamps], dim=0)
     else:
         edge_index = graph.edge_index
-        timestamp = graph.timestamp
+        timestamp = graph.timestamps
 
     edges = torch.cat([edge_index.T, timestamp.reshape((-1,1))], dim=1).numpy().astype('int')
     ports_1, ports_2 = ports_cpp.assign_ports(edges,edge_index.numpy().astype('int'), graph.num_nodes)
@@ -172,7 +172,7 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
 
     data['node'].x = x
 
-    if args.data != "ETH":
+    if (args.data != "ETH") and (args.data != "ETH-Kaggle"):
         data['node', 'to', 'node'].y = y
     else:
         data['node'].y = y

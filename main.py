@@ -1,7 +1,7 @@
 import time
 import logging
 from util import create_parser, set_seed, logger_setup
-from data_loading import get_data, get_eth_data
+from data_loading import get_data, get_eth_data, get_eth_kaggle_data
 from training import train_gnn
 from training_eth import train_gnn_eth
 from inference import infer_gnn
@@ -25,8 +25,10 @@ def main():
     t1 = time.perf_counter()
 
 
-    if args.data != "ETH":
+    if (args.data != "ETH") and ((args.data != "ETH-Kaggle")):
         tr_data, val_data, te_data, tr_inds, val_inds, te_inds = get_data(args, data_config)
+    elif args.data == "ETH-Kaggle":
+        tr_data, val_data, te_data, tr_inds, val_inds, te_inds = get_eth_kaggle_data(args, data_config)
     else:
         tr_data, val_data, te_data, tr_inds, val_inds, te_inds = get_eth_data(args, data_config)
     
@@ -36,7 +38,7 @@ def main():
     if not args.inference:
         #Training
         logging.info(f"Running Training")
-        if args.data != "ETH":
+        if args.data != "ETH" and args.data != "ETH-Kaggle":
             train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config)
         else:
             train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config)

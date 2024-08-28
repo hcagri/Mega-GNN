@@ -39,7 +39,6 @@ def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, mod
             else:
                 out = model(batch.x, batch.edge_index, batch.edge_attr)
 
-            out = model(batch.x, batch.edge_index, batch.edge_attr)
             pred = out[mask]
             ground_truth = batch.y[mask]
             preds.append(pred.argmax(dim=-1))
@@ -196,6 +195,7 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
 
     #define a model config dictionary and wandb logging at the same time
     wandb.init(
+        dir="/mnt/cagri-exp/",
         mode="disabled" if args.testing else "online",
         project="your_proj_name", #replace this with your wandb project name if you want to use wandb logging
         entity="hcbilgi",
