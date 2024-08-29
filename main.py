@@ -5,7 +5,10 @@ from data_loading import get_data, get_eth_data, get_eth_kaggle_data
 from training import train_gnn
 from training_eth import train_gnn_eth
 from inference import infer_gnn
+from train_util import extract_param
 import json
+import wandb 
+import os
 
 def main():
     parser = create_parser()
@@ -20,10 +23,41 @@ def main():
     #set seed
     set_seed(args.seed)
 
+    #define a model config dictionary and wandb logging at the same time
+    wandb.init(
+        mode="disabled" if args.testing else "online",
+        project="your_proj_name", #replace this with your wandb project name if you want to use wandb logging
+        entity="hcbilgi",
+        config={
+            "epochs": args.n_epochs,
+            "batch_size": args.batch_size,
+            "model": args.model,
+            "data": args.data,
+            "num_neighbors": args.num_neighs,
+            "lr": extract_param("lr", args),
+            "n_hidden": extract_param("n_hidden", args),
+            "n_gnn_layers": extract_param("n_gnn_layers", args),
+            "loss": "ce",
+            "w_ce1": extract_param("w_ce1", args),
+            "w_ce2": extract_param("w_ce2", args),
+            "dropout": extract_param("dropout", args),
+            "final_dropout": extract_param("final_dropout", args),
+            "n_heads": extract_param("n_heads", args) if args.model == 'gat' else None
+        }
+    )
+
+    wandb.run.log_code(
+                ".",
+                include_fn=lambda path: path.endswith(".py") or path.endswith(".yaml") or path.endswith(".sh"),
+                exclude_fn=lambda path, root: os.path.relpath(path, root).startswith("cache/"),
+            )
+            
+    args.unique_name = wandb.run.dir.split('/')[-2].split('-')[-1]
+
+
     #get data
     logging.info("Retrieving data")
     t1 = time.perf_counter()
-
 
     if (args.data != "ETH") and ((args.data != "ETH-Kaggle")):
         tr_data, val_data, te_data, tr_inds, val_inds, te_inds = get_data(args, data_config)

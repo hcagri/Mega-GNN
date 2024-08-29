@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import logging
 import itertools
-from data_util import GraphData, HeteroData, z_norm, create_hetero_obj, find_parallel_edges
+from data_util import GraphData, HeteroData, z_norm, create_hetero_obj, find_parallel_edges, assign_ports_with_cpp
 
 def get_data(args, data_config):
     '''Loads the AML transaction data.
@@ -209,10 +209,10 @@ def get_eth_data(args, data_config):
 
     logging.info(f"Total train samples: {tr_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
             f"{tr_nodes['label'].mean() * 100 :.2f}%")
-    logging.info(f"Total train samples: {val_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
-            f"{val_nodes['label'].mean() * 100 :.2f}%")
-    logging.info(f"Total train samples: {te_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
-            f"{te_nodes['label'].mean() * 100 :.2f}%")
+    logging.info(f"Total validation samples: {val_inds.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{val_nodes.loc[val_inds,'label'].mean() * 100 :.2f}%")
+    logging.info(f"Total test samples: {te_inds.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{te_nodes.loc[te_inds, 'label'].mean() * 100 :.2f}%")
     
 
     tr_nodes_max_id = tr_nodes.index[-1]
@@ -325,8 +325,6 @@ def get_eth_kaggle_data(args, data_config):
     edges['from_address'] = edges['from_address'].apply(assign_node_ids)
     nodes.drop(columns=['node'], inplace=True)
 
-    edges['timestamp'] = edges['timestamp'] - edges['timestamp'].min()
-
     edge_features = ['amount', 'timestamp']
     node_features = ['Feature']
 
@@ -355,10 +353,10 @@ def get_eth_kaggle_data(args, data_config):
 
     logging.info(f"Total train samples: {tr_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
             f"{tr_nodes['label'].mean() * 100 :.2f}%")
-    logging.info(f"Total train samples: {val_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
-            f"{val_nodes['label'].mean() * 100 :.2f}%")
-    logging.info(f"Total train samples: {te_nodes.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
-            f"{te_nodes['label'].mean() * 100 :.2f}%")
+    logging.info(f"Total validation samples: {val_inds.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{val_nodes.loc[val_inds.numpy(),'label'].mean() * 100 :.2f}%")
+    logging.info(f"Total test samples: {te_inds.shape[0] / nodes.shape[0] * 100 :.2f}% || IR: "
+            f"{te_nodes.loc[te_inds.numpy(), 'label'].mean() * 100 :.2f}%")
     
 
     tr_nodes_max_id = tr_nodes.index[-1]
@@ -367,16 +365,33 @@ def get_eth_kaggle_data(args, data_config):
 
     split_name = []
     for row in edges.itertuples():
+        '''
+        row[0]: index
+        row[1]: from_address
+        row[2]: to_address
+        row[3]: amount
+        row[4]: timestamp
+        '''
         if row[1] <= tr_nodes_max_id and row[2] <= tr_nodes_max_id:
-            split_name.append('train')
-            continue
+            if row[4] <= t1:
+                split_name.append('train')
+            elif row[4] > t1 and row[4] <= t2:
+                split_name.append('val')
+            else:
+                split_name.append('test') 
+            continue 
         elif row[1] <= val_nodes_max_id and row[2] <= val_nodes_max_id:
-            split_name.append('val')
+            if row[4] <= t2:
+                split_name.append('val')
+            else:
+                split_name.append('test') 
+            continue
         else:
             split_name.append('test')
 
 
     edges['split'] = split_name
+    edges['timestamp'] = edges['timestamp'] - edges['timestamp'].min()
 
 
     tr_edges = edges.loc[edges['split'] == 'train']
@@ -416,9 +431,12 @@ def get_eth_kaggle_data(args, data_config):
 
     if args.ports and not args.ports_batch:
         logging.info(f"Start: adding ports")
-        tr_data.add_ports()
-        val_data.add_ports()
-        te_data.add_ports()
+        assign_ports_with_cpp(tr_data, process_batch=False)
+        assign_ports_with_cpp(val_data, process_batch=False)
+        assign_ports_with_cpp(te_data, process_batch=False)
+        # tr_data.add_ports()
+        # val_data.add_ports()
+        # te_data.add_ports()
         logging.info(f"Done: adding ports")
 
 
