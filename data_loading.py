@@ -117,9 +117,9 @@ def get_data(args, data_config):
     #Adding ports and time-deltas if applicable
     if args.ports and not args.ports_batch:
         logging.info(f"Start: adding ports")
-        tr_data.add_ports()
-        val_data.add_ports()
-        te_data.add_ports()
+        assign_ports_with_cpp(tr_data, process_batch=False)
+        assign_ports_with_cpp(val_data, process_batch=False)
+        assign_ports_with_cpp(te_data, process_batch=False)
         logging.info(f"Done: adding ports")
     if args.tds:
         logging.info(f"Start: adding time-deltas")
@@ -270,9 +270,9 @@ def get_eth_data(args, data_config):
 
     if args.ports and not args.ports_batch:
         logging.info(f"Start: adding ports")
-        tr_data.add_ports()
-        val_data.add_ports()
-        te_data.add_ports()
+        assign_ports_with_cpp(tr_data, process_batch=False)
+        assign_ports_with_cpp(val_data, process_batch=False)
+        assign_ports_with_cpp(te_data, process_batch=False)
         logging.info(f"Done: adding ports")
 
 

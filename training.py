@@ -153,7 +153,12 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
 def get_model(sample_batch, config, args):
     n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
     e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
-    index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
+    
+    try:
+        index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
+    except:
+        index_ = None
+
     if args.model == "gin":
         model = GINe(
                 num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
@@ -191,40 +196,7 @@ def get_model(sample_batch, config, args):
 
 def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config):
     #set device
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    #define a model config dictionary and wandb logging at the same time
-    wandb.init(
-        dir="/mnt/cagri-exp/",
-        mode="disabled" if args.testing else "online",
-        project="your_proj_name", #replace this with your wandb project name if you want to use wandb logging
-        entity="hcbilgi",
-        config={
-            "epochs": args.n_epochs,
-            "batch_size": args.batch_size,
-            "model": args.model,
-            "data": args.data,
-            "num_neighbors": args.num_neighs,
-            "lr": extract_param("lr", args),
-            "n_hidden": extract_param("n_hidden", args),
-            "n_gnn_layers": extract_param("n_gnn_layers", args),
-            "loss": "ce",
-            "w_ce1": extract_param("w_ce1", args),
-            "w_ce2": extract_param("w_ce2", args),
-            "dropout": extract_param("dropout", args),
-            "final_dropout": extract_param("final_dropout", args),
-            "n_heads": extract_param("n_heads", args) if args.model == 'gat' else None
-        }
-    )
-
-    wandb.run.log_code(
-                ".",
-                include_fn=lambda path: path.endswith(".py") or path.endswith(".yaml") or path.endswith(".sh"),
-                exclude_fn=lambda path, root: os.path.relpath(path, root).startswith("cache/"),
-            )
-            
-    args.unique_name = wandb.run.dir.split('/')[-2].split('-')[-1]
-    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")    
     config = wandb.config
 
     #set the transform if ego ids should be used

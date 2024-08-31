@@ -277,7 +277,6 @@ def get_model(sample_batch, config, args):
 def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config):
     #set device
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
     config = wandb.config
 
     #set the transform if ego ids should be used
@@ -323,7 +322,6 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     sample_x = sample_batch.x if not isinstance(sample_batch, HeteroData) else sample_batch.x_dict
     sample_edge_index = sample_batch.edge_index if not isinstance(sample_batch, HeteroData) else sample_batch.edge_index_dict
     sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
-
     if args.flatten_edges:
         sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
     else:
