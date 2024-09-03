@@ -43,7 +43,10 @@ def extract_param(parameter_name: str, args) -> float:
     Returns:
     - float: Value of the specified parameter.
     """
-    file_path = './model_settings.json'
+    if 'ETH' in args.data:
+        file_path = './model_settings_ETH.json'
+    else:
+        file_path = './model_settings.json'
     with open(file_path, "r") as file:
         data = json.load(file)
 

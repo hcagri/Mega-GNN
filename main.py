@@ -15,6 +15,8 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
 
+    args.num_neighs = [int(t) for t in args.num_neighs]
+
     with open('data_config.json', 'r') as config_file:
         data_config = json.load(config_file)
 
@@ -24,7 +26,7 @@ def main():
     #set seed
     if args.seed == 1:
         args.seed = random.randint(2, 256000)
-        
+
     set_seed(args.seed)
 
     #define a model config dictionary and wandb logging at the same time
