@@ -8,6 +8,7 @@ from inference import infer_gnn
 from train_util import extract_param
 import json
 import wandb 
+import random
 import os
 
 def main():
@@ -21,6 +22,9 @@ def main():
     logger_setup()
 
     #set seed
+    if args.seed == 1:
+        args.seed = random.randint(2, 256000)
+        
     set_seed(args.seed)
 
     #define a model config dictionary and wandb logging at the same time
@@ -54,6 +58,16 @@ def main():
             
     args.unique_name = wandb.run.dir.split('/')[-2].split('-')[-1]
 
+    # Print the config 
+    print("----- CONFIG -----")
+    for key, value in wandb.config.items():
+        print(key, ':', value)
+    print(2*"------------------")
+
+    print("----- ARGS -----")
+    for key, value in vars(args).items():
+        print(key, ':', value)
+    print(2*"------------------")
 
     #get data
     logging.info("Retrieving data")
