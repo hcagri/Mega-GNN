@@ -454,7 +454,7 @@ class PNA(torch.nn.Module):
             self.mlp = nn.Sequential(Linear(n_hidden, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
                                 Linear(25, n_classes))
 
-    def forward(self, x, edge_index, edge_attr, simp_edge_batch):
+    def forward(self, x, edge_index, edge_attr, simp_edge_batch=None):
         src, dst = edge_index
 
         '''
