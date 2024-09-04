@@ -180,11 +180,10 @@ def get_model(sample_batch, config, args):
             index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
             d = degree(index, dtype=torch.long)
         deg = torch.bincount(d, minlength=1)
-        model = PNA(
-            num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
-            n_hidden=round(config.n_hidden), edge_updates=args.emlps, edge_dim=e_dim,
-            dropout=config.dropout, deg=deg, final_dropout=config.final_dropout
-            )
+        model = PNA(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, n_hidden=round(config.n_hidden), 
+                    edge_updates=args.emlps, edge_dim=e_dim, final_dropout=config.final_dropout, deg=deg, flatten_edges=args.flatten_edges, 
+                    edge_agg_type=args.edge_agg_type, index_=index_, args=args)
+
     elif config.model == "rgcn":
         model = RGCN(
             num_features=n_feats, edge_dim=e_dim, num_relations=8, num_gnn_layers=round(config.n_gnn_layers),

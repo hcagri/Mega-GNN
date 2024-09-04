@@ -11,6 +11,7 @@ from torch_geometric.utils import degree
 from genagg import GenAgg
 from genagg.MLPAutoencoder import MLPAutoencoder
 import math 
+import time
 
 
 class PositionalEncoding(nn.Module):
@@ -52,13 +53,18 @@ class TransformerAgg(nn.Module):
         # Add timestamps to the edge features to be able to sort according to them
         x = torch.cat([timestamps_.view(-1, 1), x], dim=1)
         
+        s_pre = time.time()
         sort_ids = torch.argsort(index)
         dense_edge_feats, mask = to_dense_batch(x[sort_ids, :], index[sort_ids])
         sorted_dense_edge_feats, sorted_mask = self.sort_wrt_time(dense_edge_feats, mask)
-
+        
+        s_post = time.time()
         sorted_dense_edge_feats = self.pos_enc(sorted_dense_edge_feats.permute(1,0,2)).permute(1,0,2)
         sorted_dense_edge_feats = self.trans_enc(sorted_dense_edge_feats, src_key_padding_mask = ~sorted_mask)
         sorted_dense_edge_feats[~sorted_mask.unsqueeze(-1).expand(-1, -1, sorted_dense_edge_feats.shape[-1])] = 0
+        s_res = time.time()
+
+        logging.debug(f"Preprocessing Time Transformer: {s_post - s_pre} | Transformer forward pass: {s_res - s_post}")
 
         return sorted_dense_edge_feats.mean(dim=1).squeeze()
 
@@ -218,6 +224,11 @@ class SumAgg(nn.Module):
         super().__init__()
     def forward(self, x, index):
         return scatter(x, index, dim=0, reduce='sum')
+
+    def reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
 class MultiEdgeAggModule(nn.Module):
     def __init__(self, n_hidden=None, agg_type=None, index=None):
@@ -398,14 +409,21 @@ class GATe(torch.nn.Module):
     
 class PNA(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, 
-                n_hidden=100, edge_updates=True,
-                edge_dim=None, dropout=0.0, final_dropout=0.5, deg=None):
+                n_hidden=100, edge_updates=True, edge_dim=None,
+                final_dropout=0.5, deg=None, flatten_edges=False,  
+                edge_agg_type=None, index_ = None, args=None):
         super().__init__()
         n_hidden = int((n_hidden // 5) * 5)
         self.n_hidden = n_hidden
         self.num_gnn_layers = num_gnn_layers
         self.edge_updates = edge_updates
         self.final_dropout = final_dropout
+        self.flatten_edges = flatten_edges
+        self.args = args
+        self.edge_agg_type = edge_agg_type
+
+        self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=edge_agg_type, index=index_)
+
 
         aggregators = ['mean', 'min', 'max', 'std']
         scalers = ['identity', 'amplification', 'attenuation']
@@ -429,27 +447,56 @@ class PNA(torch.nn.Module):
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
 
-        self.mlp = nn.Sequential(Linear(n_hidden*3, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
-                              Linear(25, n_classes))
+        if (args.data != 'ETH') and (args.data != 'ETH-Kaggle'):
+            self.mlp = nn.Sequential(Linear(n_hidden*3, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
+                                Linear(25, n_classes))
+        else:
+            self.mlp = nn.Sequential(Linear(n_hidden, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
+                                Linear(25, n_classes))
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr, simp_edge_batch):
         src, dst = edge_index
+
+        '''
+            Only for adamm architecture the 
+        '''
+        times = edge_attr[:, 0].clone()
 
         x = self.node_emb(x)
         edge_attr = self.edge_emb(edge_attr)
 
-        for i in range(self.num_gnn_layers):
-            x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
-            if self.edge_updates: 
-                edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+        if self.edge_agg_type == 'adamm':
+            # Apply the flattening at the beggining only.
+            edge_index, edge_attr, _ = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
+            src, dst = edge_index
 
-        logging.debug(f"x.shape = {x.shape}, x[edge_index.T].shape = {x[edge_index.T].shape}")
-        x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
-        logging.debug(f"x.shape = {x.shape}")
-        x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
-        logging.debug(f"x.shape = {x.shape}")
+            for i in range(self.num_gnn_layers):
+                x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
+                if self.edge_updates: 
+                    edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2   
+        else:
+            src, dst = edge_index
+
+            for i in range(self.num_gnn_layers):
+                if self.flatten_edges:
+                    n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
+                    x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
+                    if self.edge_updates: 
+                        remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices) # artificall node attributes 
+                        edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], remapped_edge_attr, edge_attr], dim=-1)) / 2
+                else:
+                    x = (x + F.relu(self.batch_norms[i](self.convs[i](x, edge_index, edge_attr)))) / 2
+                    if self.edge_updates: 
+                        edge_attr = edge_attr + self.emlps[i](torch.cat([x[src], x[dst], edge_attr], dim=-1)) / 2
+
+        if (self.args.data != 'ETH') and (self.args.data != 'ETH-Kaggle'):
+            x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
+            x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
         out = x
+        
         return self.mlp(out)
+
+
     
 class RGCN(nn.Module):
     def __init__(self, num_features, edge_dim, num_relations, num_gnn_layers, n_classes=2, 
