@@ -7,7 +7,7 @@
         "n_gnn_layers": 2,
         "loss": "ce",
         "w_ce1": 1,
-        "w_ce2": 1.16,
+        "w_ce2": 9,
         "norm_method": "z_normalize",
         "dropout": 0.123,
         "final_dropout": 0.073
@@ -34,7 +34,7 @@
         "n_gnn_layers": 2,
         "loss": "ce",
         "w_ce1": 1,
-        "w_ce2": 1.16,
+        "w_ce2": 9,
         "norm_method": "z_normalize",
         "dropout": 0.123,
         "final_dropout": 0.073
