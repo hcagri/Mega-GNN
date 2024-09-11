@@ -23,6 +23,19 @@ def main():
     # Setup logging
     logger_setup()
 
+    # Check Argument consistency
+    if args.task == 'edge_class':
+        assert args.data in ['Small_HI', 'Small_LI', 'Medium_HI', 'Medium_LI']
+    elif args.task == 'node_class':
+        assert args.data in ['ETH', 'ETH-Kaggle']
+
+    if args.edge_agg_type == 'adamm':
+        assert args.task == 'node_class'
+
+    if args.ports and not args.ports_batch:
+        assert args.task == 'lp'
+
+
     #set seed
     if args.seed == 1:
         args.seed = random.randint(2, 256000)

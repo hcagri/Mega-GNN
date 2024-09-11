@@ -1,9 +1,10 @@
 import torch
 import tqdm
 from sklearn.metrics import f1_score
-from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, evaluate_hetero, save_model, load_model
+from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, negative_edge_sampling, \
+    evaluate_hetero, evaluate_hetero_lp, save_model, load_model, compute_mrr, compute_auc, gnn_get_predictions_and_labels, lp_compute_metrics
 from data_util import z_norm, assign_ports_with_cpp
-from models import GINe, PNA, GATe, RGCN
+from models import MultiMPNN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
 from torch_geometric.utils import degree
@@ -13,6 +14,9 @@ from torch_scatter import scatter
 import numpy as np
 import os
 import time
+
+def lp_loss_fn(input1, input2):
+    return -torch.log(input1 + 1e-7).mean() - torch.log(1 - input2 + 1e-7).mean()
 
 def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
     #training
@@ -106,12 +110,9 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
             batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
 
             batch.to(device)
-            if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
-            else:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
-            out = out[('node', 'to', 'node')]
+            out = model(batch)
+                
             pred = out[mask]
             ground_truth = batch['node', 'to', 'node'].y[mask]
             preds.append(pred.argmax(dim=-1))
@@ -150,6 +151,116 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
         
     return model
 
+def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
+    #training
+    global_step = 0
+    assert args.task == 'lp', "Training Error: Wrong training script for given task"
+
+    for epoch in range(config.epochs):
+        logging.info(f'****** EPOCH {epoch} ******')
+
+        total_loss = total_examples = 0
+        batch_metrics = { 'lr': [], 'loss': [],
+                          'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 
+                          'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []
+                        }
+
+        epoch_preds_labels = {"pos_pred": [], "neg_pred": [], "pos_labels": [], "neg_labels": []}
+        
+        assert model.training, "Training error: Model is not in training mode"
+        step = 0
+        for batch in tqdm.tqdm(tr_loader, disable=not args.tqdm):
+            
+            #remove the unique edge id from the edge features, as it's no longer needed
+            batch['node', 'to', 'node'].edge_attr = batch['node', 'to', 'node'].edge_attr[:, 1:]
+            batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
+
+            negative_edge_sampling(batch, args)
+            
+            ''' Add port numberings after neighborhood sampling. ''' 
+            if args.ports and args.ports_batch:
+                # To be consistent, sample the edges for forward and backward edge types.
+                assign_ports_with_cpp(batch) 
+            
+            optimizer.zero_grad()
+
+            batch.to(device)
+
+            out = model(batch)
+
+            pos_labels = batch['node', 'to', 'node'].pos_y
+            pos_pred = out[0]
+            neg_labels = batch['node', 'to', 'node'].neg_y
+            neg_pred = out[1]
+
+            loss = lp_loss_fn(pos_pred, neg_pred)
+            batch_metrics['loss'].append(loss.detach().item())
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += float(loss) * (pos_pred.numel() + neg_pred.numel())
+            total_examples += (pos_pred.numel() + neg_pred.numel())
+
+            # Free some GPU memory
+            pos_pred, neg_pred, pos_labels, neg_labels = pos_pred.detach().cpu(), neg_pred.detach().cpu(), pos_labels.detach().cpu(), neg_labels.detach().cpu()
+            loss = loss.detach().cpu()
+
+            # GNN predictions and metrics (link prediction)
+            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,5,10])
+            gnn_auc = compute_auc(pos_pred, neg_pred, pos_labels, neg_labels)
+            for key in gnn_hits_dict:
+                batch_metrics['lp_'+key].append(gnn_hits_dict[key])
+            batch_metrics['lp_mrr'].append(gnn_mrr)
+            batch_metrics['lp_auc'].append(gnn_auc)
+            gnn_preds_labels = gnn_get_predictions_and_labels(pos_pred, neg_pred, pos_labels, neg_labels)
+            lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+            for key in lp_metrics:
+                batch_metrics[key].append(lp_metrics[key])
+            for k, v in gnn_preds_labels.items(): 
+                epoch_preds_labels[k].extend(v.tolist())
+
+            step += 1
+            global_step += 1
+            # Log batch metrics
+            if step % 200 == 0:
+                logging.info(f'\nTrain ' + '| '.join([f'{k}: {v[-1]:.4g}' for k,v in batch_metrics.items()]))
+                wandb.log({f'batch_{k}': v[-1] for k, v in batch_metrics.items()}, step=global_step)
+
+
+       ## After epoch ends
+        # Log epoch metrics
+        epoch_metrics = {f'tr_{met}': np.mean(batch_metrics[met]) for met in ['loss', 'lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        epoch_preds_labels = {k: np.array(v) for k, v in epoch_preds_labels.items()}
+        lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+        for k, v in lp_metrics.items():
+            epoch_metrics['tr_' + k] = v
+        logging.info("***** Train results - EPOCH {} *****".format(epoch))
+        for k, v in epoch_metrics.items():
+            logging.info(f" {k}: {v:.4g}")
+
+        wandb.log(epoch_metrics, step=global_step)
+
+        # Do evaluation
+        # Clear CUDA cache before evaluating
+        torch.cuda.empty_cache()
+        
+        val_metrics = evaluate_hetero_lp(val_loader, val_inds, model, val_data, device, args, mode='eval')
+        logging.info("***** {} - Eval results *****".format(epoch))
+        for key in sorted(val_metrics.keys()):
+            logging.info("  %s = %s" % (key, str(val_metrics[key])))
+
+        te_metrics = evaluate_hetero_lp(te_loader, te_inds, model, te_data, device, args, mode='test')
+        logging.info("***** {} - Eval results *****".format(epoch))
+        for key in sorted(te_metrics.keys()):
+            logging.info("  %s = %s" % (key, str(te_metrics[key])))
+
+        # Log eval metrics
+        wandb.log(val_metrics, step=global_step)
+        wandb.log(te_metrics, step=global_step)
+
+    return model
+
 def get_model(sample_batch, config, args):
     n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
     e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
@@ -159,38 +270,17 @@ def get_model(sample_batch, config, args):
     except:
         index_ = None
 
-    if args.model == "gin":
-        model = GINe(
-                num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
-                n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
-                dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges,
-                edge_agg_type = args.edge_agg_type, node_agg_type=args.node_agg_type, index_=index_, args=args
-                )
-    elif args.model == "gat":
-        model = GATe(
-                num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
-                n_hidden=round(config.n_hidden), n_heads=round(config.n_heads), 
-                edge_updates=args.emlps, edge_dim=e_dim,
-                dropout=config.dropout, final_dropout=config.final_dropout
-                )
-    elif args.model == "pna":
-        if not isinstance(sample_batch, HeteroData):
-            d = degree(sample_batch.edge_index[1], dtype=torch.long)
-        else:
-            index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
-            d = degree(index, dtype=torch.long)
-        deg = torch.bincount(d, minlength=1)
-        model = PNA(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, n_hidden=round(config.n_hidden), 
-                    edge_updates=args.emlps, edge_dim=e_dim, final_dropout=config.final_dropout, deg=deg, flatten_edges=args.flatten_edges, 
-                    edge_agg_type=args.edge_agg_type, index_=index_, args=args)
+    if not isinstance(sample_batch, HeteroData):
+        d = degree(sample_batch.edge_index[1], dtype=torch.long)
+    else:
+        index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
+        d = degree(index, dtype=torch.long)
+    deg = torch.bincount(d, minlength=1)
 
-    elif config.model == "rgcn":
-        model = RGCN(
-            num_features=n_feats, edge_dim=e_dim, num_relations=8, num_gnn_layers=round(config.n_gnn_layers),
-            n_classes=2, n_hidden=round(config.n_hidden),
-            edge_update=args.emlps, dropout=config.dropout, final_dropout=config.final_dropout, n_bases=None #(maybe)
-        )
-    
+    model = MultiMPNN(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, 
+                      n_hidden=round(config.n_hidden), edge_updates=args.emlps, edge_dim=e_dim, 
+                      final_dropout=config.final_dropout, index_=index_, deg=deg, args=args)
+
     return model
 
 def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config):
@@ -222,38 +312,33 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
 
     model = get_model(sample_batch, config, args)
 
-    if args.reverse_mp:
-        model = to_hetero(model, te_data.metadata(), aggr='mean')
-    
     if args.finetune:
         model, optimizer = load_model(model, device, args, config, data_config)
     else:
         model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     
-    sample_batch.to(device)
-    sample_x = sample_batch.x if not isinstance(sample_batch, HeteroData) else sample_batch.x_dict
-    sample_edge_index = sample_batch.edge_index if not isinstance(sample_batch, HeteroData) else sample_batch.edge_index_dict
     if isinstance(sample_batch, HeteroData):
         sample_batch['node', 'to', 'node'].edge_attr = sample_batch['node', 'to', 'node'].edge_attr[:, 1:]
         sample_batch['node', 'rev_to', 'node'].edge_attr = sample_batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
     else:
         sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
-    sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
-    # sample_timestamps = sample_batch.timestamps if not isinstance(sample_batch, HeteroData) else sample_batch.timestamps_dict
 
-    if args.flatten_edges:
-        sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
-    else:
-        sample_simp_edge_batch = None
+    if args.task == 'lp':
+        negative_edge_sampling(sample_batch, args)
 
-    logging.info(summary(model, sample_x, sample_edge_index, sample_edge_attr, sample_simp_edge_batch))
+    sample_batch.to(device)
+
+    logging.info(summary(model, sample_batch))
     
     loss_fn = torch.nn.CrossEntropyLoss(weight=torch.FloatTensor([config.w_ce1, config.w_ce2]).to(device))
 
-    if args.reverse_mp:
-        model = train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
+    if args.task == 'lp':
+        model = train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
     else:
-        model = train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
+        if args.reverse_mp:
+            model = train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
+        else:
+            model = train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
     
     wandb.finish()

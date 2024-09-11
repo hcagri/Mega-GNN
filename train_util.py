@@ -8,6 +8,8 @@ from sklearn.metrics import f1_score
 import json
 import os
 from data_util import assign_ports_with_cpp
+import numpy as np
+import sklearn.metrics
 
 class AddEgoIds(BaseTransform):
     r"""Add IDs to the centre nodes of the batch.
@@ -136,7 +138,7 @@ def evaluate_homo(loader, inds, model, data, device, args):
         
         with torch.no_grad():
             batch.to(device)
-            out = model(batch.x, batch.edge_index, batch.edge_attr)
+            out = model(batch)
             out = out[mask]
             pred = out.argmax(dim=-1)
             preds.append(pred)
@@ -192,12 +194,9 @@ def evaluate_hetero(loader, inds, model, data, device, args):
         
         with torch.no_grad():
             batch.to(device)
-            if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
-            else:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+
+            out = model(batch)
                 
-            out = out[('node', 'to', 'node')]
             out = out[mask]
             pred = out.argmax(dim=-1)
             preds.append(pred)
@@ -208,6 +207,72 @@ def evaluate_hetero(loader, inds, model, data, device, args):
 
     model.train()
     return f1
+
+@torch.no_grad()
+def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
+    '''Evaluates the model performane for heterogenous graph data.'''
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
+
+    eval_preds_labels = {"pos_pred": [], "neg_pred": [], "pos_labels": [], "neg_labels": []}
+    batch_metrics = { 'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 
+                     'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []}
+    
+
+    for batch in tqdm.tqdm(loader, disable=not args.tqdm):
+        step+=1
+        #remove the unique edge id from the edge features, as it's no longer needed
+        batch['node', 'to', 'node'].edge_attr = batch['node', 'to', 'node'].edge_attr[:, 1:]
+        batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
+
+        negative_edge_sampling(batch, args)
+        if args.ports and args.ports_batch:
+            # To be consistent, sample the edges for forward and backward edge types.
+            assign_ports_with_cpp(batch) 
+        
+        with torch.no_grad():
+            batch.to(device)
+            out = model(batch)
+
+            pos_labels = batch['node', 'to', 'node'].pos_y
+            pos_pred = out[0]
+            neg_labels = batch['node', 'to', 'node'].neg_y
+            neg_pred = out[1]
+
+            # Free some GPU memory
+            pos_pred, neg_pred, pos_labels, neg_labels = pos_pred.detach().cpu(), neg_pred.detach().cpu(), pos_labels.detach().cpu(), neg_labels.detach().cpu()
+            
+            # GNN predictions and metrics (link prediction)
+            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,5,10])
+            gnn_auc = compute_auc(pos_pred, neg_pred, pos_labels, neg_labels)
+            for key in gnn_hits_dict:
+                batch_metrics['lp_'+key].append(gnn_hits_dict[key])
+            batch_metrics['lp_mrr'].append(gnn_mrr)
+            batch_metrics['lp_auc'].append(gnn_auc)
+            gnn_preds_labels = gnn_get_predictions_and_labels(pos_pred, neg_pred, pos_labels, neg_labels)
+            lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+            for key in lp_metrics:
+                batch_metrics[key].append(lp_metrics[key])
+            for k, v in gnn_preds_labels.items(): 
+                eval_preds_labels[k].extend(v.tolist())
+        
+
+    ## Compute eval metrics
+    if mode == 'eval':
+        eval_metrics = {f'ev_{met}': np.mean(batch_metrics[met]) for met in ['lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        eval_preds_labels = {k: np.array(v) for k, v in eval_preds_labels.items()}
+        lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+        for k, v in lp_metrics.items():
+            eval_metrics['ev_' + k] = v
+    elif mode == 'test':
+        eval_metrics = {f'te_{met}': np.mean(batch_metrics[met]) for met in ['lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        eval_preds_labels = {k: np.array(v) for k, v in eval_preds_labels.items()}
+        lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+        for k, v in lp_metrics.items():
+            eval_metrics['te_' + k] = v
+
+    model.train()
+    return eval_metrics
 
 def save_model(model, optimizer, epoch, args, data_config):
     # Save the model in a dictionary
@@ -230,3 +295,203 @@ def load_model(model, device, args, config, data_config):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     return model, optimizer
+
+
+def negative_edge_sampling(batch, args):
+
+    '''
+        Sample positive and negative edges from given subgraph for link prediction objective
+        
+        Args:
+            batch: Sampled Subgraph
+    '''
+    if isinstance(batch, HeteroData):
+        #1. add the negative samples
+        E = batch['node', 'to', 'node'].edge_index.shape[1]
+
+        positions = torch.arange(E)
+        drop_count = min(args.batch_size, int(len(positions) * 0.15)) # 15% probability to drop an edge or maximally 200 edges
+        if len(positions) > 0 and drop_count > 0:
+            drop_idxs = torch.multinomial(torch.full((len(positions),), 1.0), drop_count, replacement=False) #[drop_count, ]
+        else:
+            drop_idxs = torch.tensor([]).long()
+        drop_positions = positions[drop_idxs]
+
+        mask = torch.zeros((E,)).long() #[E, ]
+        mask = mask.index_fill_(dim=0, index=drop_positions, value=1).bool() #[E, ]
+
+        input_edge_index = batch['node', 'to', 'node'].edge_index[:, ~mask]
+        input_edge_attr  = batch['node', 'to', 'node'].edge_attr[~mask]
+
+        pos_edge_index = batch['node', 'to', 'node'].edge_index[:, mask]
+        pos_edge_attr  = batch['node', 'to', 'node'].edge_attr[mask]
+
+        # Discard the reverse of the possitive edges if any in the 'rev_to'
+        pos_edges_with_feats = torch.cat([pos_edge_index.T, pos_edge_attr], dim=1)
+        reverse_combined = torch.cat([
+            batch['node', 'rev_to', 'node'].edge_index[[1, 0], :].T, # Edge indices are reverse becase positive edges are the original edges, we would like to discard reverse ones.
+            batch['node', 'rev_to', 'node'].edge_attr
+            ], 
+            dim=1)
+        
+        _, idx, counts = torch.cat([pos_edges_with_feats, reverse_combined], dim=0).unique(
+        dim=0, return_inverse=True, return_counts=True)
+        mask_all = torch.isin(idx, torch.where(counts.gt(1))[0])
+        mask_rev = mask_all[len(pos_edges_with_feats):]  # tensor([ True, False, False,  True], device='cuda:0')
+        
+        # Initialize an empty list to store negative edges
+        neg_edges = []
+        neg_edge_attrs = []
+
+        nodeset = set(range(batch['node', 'to', 'node'].edge_index.max()+1))
+
+        # Iterate over each positive edge
+        for i, edge in enumerate(pos_edge_index.t()):
+            src, dst = edge[0], edge[1]
+
+            # Chose negative examples in a smart way
+            unavail_mask = (batch['node', 'to', 'node'].edge_index == src).any(dim=0) | (batch['node', 'to', 'node'].edge_index == dst).any(dim=0)
+            unavail_nodes = torch.unique(batch['node', 'to', 'node'].edge_index[:, unavail_mask])
+            unavail_nodes = set(unavail_nodes.tolist())
+            avail_nodes = nodeset - unavail_nodes
+            avail_nodes = torch.tensor(list(avail_nodes))
+            # Finally, emmulate np.random.choice() to chose randomly amongst available nodes
+            indices = torch.randperm(len(avail_nodes))[:64]
+            neg_nodes = avail_nodes[indices]
+            
+            # Generate 32 negative edges with the same source but different destinations
+            neg_dsts = neg_nodes[:32]  # Selecting 32 random destination nodes for the source
+            neg_edges_src = torch.stack([src.repeat(32), neg_dsts], dim=0)
+            
+            # Generate 32 negative edges with the same destination but different sources
+            neg_srcs = neg_nodes[32:]  # Selecting 32 random source nodes for the destination
+            neg_edges_dst = torch.stack([neg_srcs, dst.repeat(32)], dim=0)
+
+            # Add these negative edges to the list
+            neg_edges.append(neg_edges_src)
+            neg_edges.append(neg_edges_dst)
+
+            # Replicate the positive edge attribute for each of the negative edges generated from this edge
+            pos_attr = pos_edge_attr[i].unsqueeze(0)  # Get the attribute of the current positive edge
+            replicated_attr = pos_attr.repeat(64, 1)  # Replicate it 64 times (for each negative edge)
+            neg_edge_attrs.append(replicated_attr)
+
+        # Concatenate all negative edges to form the neg_edge_index
+        neg_edge_index = torch.cat(neg_edges, dim=1)
+        neg_edge_attr = torch.cat(neg_edge_attrs, dim=0)
+
+        # Update the batch object
+        batch['node', 'to', 'node'].edge_index, batch['node', 'to', 'node'].edge_attr = input_edge_index, input_edge_attr
+        batch['node', 'to', 'node'].pos_edge_index, batch['node', 'to', 'node'].pos_edge_attr = pos_edge_index, pos_edge_attr
+        batch['node', 'to', 'node'].neg_edge_index, batch['node', 'to', 'node'].neg_edge_attr = neg_edge_index, neg_edge_attr
+        
+        batch['node', 'to', 'node'].pos_y = torch.ones(pos_edge_index.shape[1]  , dtype=torch.int32)
+        batch['node', 'to', 'node'].neg_y = torch.zeros(neg_edge_index.shape[1], dtype=torch.int32)
+
+        batch['node', 'rev_to', 'node'].edge_index = batch['node', 'rev_to', 'node'].edge_index[:, mask_rev]
+        batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[mask_rev, :]
+        batch['node', 'rev_to', 'node'].timestamps = batch['node', 'rev_to', 'node'].timestamps[mask_rev]
+        batch['node', 'rev_to', 'node'].e_id = batch['node', 'rev_to', 'node'].e_id[mask_rev]
+
+        if args.flatten_edges:
+            batch['node', 'to', 'node'].simp_edge_batch = batch['node', 'to', 'node'].simp_edge_batch[~mask]
+            batch['node', 'rev_to', 'node'].simp_edge_batch = batch['node', 'rev_to', 'node'].simp_edge_batch[mask_rev]
+
+    else:
+        #TODO
+        raise NotImplementedError('Link prediction without Reverse MP is not implemented!')
+
+    return
+
+
+def compute_mrr(pos_pred, neg_pred, ks):
+    """Compute mean reciprocal rank (MRR) and Hits@k for link prediction.
+    
+    Returns
+    -------
+    float, dict[str, float]
+        MRR and dictionnary with Hits@k metrics. 
+    """
+    pos_pred = pos_pred.detach().clone().cpu().numpy().flatten()
+    neg_pred = neg_pred.detach().clone().cpu().numpy().flatten()
+
+    num_positives = len(pos_pred)
+    neg_pred_reshaped = neg_pred.reshape(num_positives, 64)
+
+    mrr_scores = []
+    keys = [f'hits@{k}' for k in ks]
+    hits_dict = {key: 0 for key in keys}
+    count = 0
+
+    for pos, neg in zip(pos_pred, neg_pred_reshaped):
+        # Combine positive and negative predictions
+        combined = np.concatenate([neg, [pos]])  # Add positive prediction to the end
+
+        # Rank predictions (argsort twice gives the ranks)
+        ranks = (-combined).argsort().argsort() + 1  # Add 1 because ranks start from 1
+        for k, key in zip(ks, keys):
+            if ranks[-1] <= k:
+                hits_dict[key] += 1
+        
+        count += 1
+        # Reciprocal rank of positive prediction (which is the last one in combined)
+        reciprocal_rank = 1 / ranks[-1]
+        mrr_scores.append(reciprocal_rank)
+    
+    # Calculate Hits@k
+    for key in keys:
+        hits_dict[key] /= count
+
+    # Calculate Mean Reciprocal Rank
+    mrr = np.mean(mrr_scores)
+    
+    return mrr, hits_dict
+
+
+def compute_auc(pos_probs, neg_probs, pos_labels, neg_labels):
+    """Compute the area under the curve (AUC) of precision/recall for link prediction."""
+    probs = np.concatenate((pos_probs, neg_probs), axis=0)
+    labels = np.concatenate((pos_labels, neg_labels), axis=0)
+
+    precision, recall, _ = sklearn.metrics.precision_recall_curve(labels, probs, pos_label=1)
+    auc = sklearn.metrics.auc(recall, precision)
+
+    return auc
+
+
+def gnn_get_predictions_and_labels(pos_pred, neg_pred, pos_label, neg_label) -> dict[str, np.ndarray]:
+    pos_pred = (pos_pred >= 0.5).float()
+    neg_pred = (neg_pred >= 0.5).float()
+
+    # All the outputs are numpy ndarrays
+    return {
+        "pos_pred": pos_pred.detach().clone().cpu().numpy().flatten(), "neg_pred": neg_pred.detach().clone().cpu().numpy().flatten(),
+        "pos_labels": pos_label.detach().clone().cpu().numpy(), "neg_labels": neg_label.detach().clone().cpu().numpy()
+    }
+
+def lp_compute_metrics(pos_pred, neg_pred, pos_labels, neg_labels) -> dict[str, float]:
+    """Compute mean accuracy and positive F1 score for link prediction."""
+    # Calculate positive accuracy
+    pos_accuracy = np.mean(pos_pred == pos_labels)
+    
+    # Calculate negative accuracy
+    neg_accuracy = np.mean(neg_pred == neg_labels)
+    
+    # Calculate overall accuracy
+    mean_accuracy = (pos_accuracy + neg_accuracy) / 2
+
+    # Calculate TP, FP, FN
+    preds = np.concatenate((pos_pred, neg_pred), axis=0)
+    labels = np.concatenate((pos_labels, neg_labels), axis=0)
+    TP = np.sum((preds == 1) & (labels == 1))
+    FP = np.sum((preds == 1) & (labels == 0))
+    FN = np.sum((preds == 0) & (labels == 1))
+
+    # Calculate Precision and Recall for positive class
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+
+    # Calculate positive F1 Score
+    pos_f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return { 'lp_mean_acc': mean_accuracy, 'lp_pos_f1': pos_f1 }

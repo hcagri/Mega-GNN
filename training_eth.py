@@ -2,9 +2,10 @@ import torch
 from typing import Union
 import tqdm
 from sklearn.metrics import f1_score
-from train_util import extract_param, save_model, load_model
+from train_util import extract_param, save_model, load_model, negative_edge_sampling
+from training import train_hetero_lp
 from data_util import z_norm, assign_ports_with_cpp
-from models import GINe, PNA, GATe, RGCN
+from models import MultiMPNN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.transforms import BaseTransform
 from torch_geometric.nn import to_hetero, summary
@@ -45,12 +46,9 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
             batch['node'].x = batch['node'].x[:, 1:]
 
             batch.to(device)
-            if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
-            else:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
 
-            out = out[('node')]
+            out = model(batch)
+
             pred = out[mask]
             ground_truth = batch['node'].y[mask]
             preds.append(pred.argmax(dim=-1))
@@ -113,12 +111,8 @@ def evaluate_hetero(loader, inds, model, data, device, args):
         
         with torch.no_grad():
             batch.to(device)
-            if args.flatten_edges:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict, batch.simp_edge_batch_dict)
-            else:
-                out = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
+            out = model(batch)
                 
-            out = out[('node')]
             out = out[mask]
             pred = out.argmax(dim=-1)
             preds.append(pred)
@@ -234,43 +228,23 @@ class AddEgoIds(BaseTransform):
 def get_model(sample_batch, config, args):
     n_feats = (sample_batch.x.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node'].x.shape[1] - 1)
     e_dim = sample_batch.edge_attr.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].edge_attr.shape[1]
+    
     try:
         index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
     except:
         index_ = None
 
-    if args.model == "gin":
-        model = GINe(
-                num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
-                n_hidden=round(config.n_hidden), residual=False, edge_updates=args.emlps, edge_dim=e_dim, 
-                dropout=config.dropout, final_dropout=config.final_dropout, flatten_edges=args.flatten_edges,
-                edge_agg_type = args.edge_agg_type, node_agg_type=args.node_agg_type, index_=index_, args=args
-                )
-    elif args.model == "gat":
-        model = GATe(
-                num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2,
-                n_hidden=round(config.n_hidden), n_heads=round(config.n_heads), 
-                edge_updates=args.emlps, edge_dim=e_dim,
-                dropout=config.dropout, final_dropout=config.final_dropout
-                )
-    elif args.model == "pna":
-        if not isinstance(sample_batch, HeteroData):
-            d = degree(sample_batch.edge_index[1], dtype=torch.long)
-        else:
-            index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
-            d = degree(index, dtype=torch.long)
-        deg = torch.bincount(d, minlength=1)
-        model = PNA(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, n_hidden=round(config.n_hidden), 
-                    edge_updates=args.emlps, edge_dim=e_dim, final_dropout=config.final_dropout, deg=deg, flatten_edges=args.flatten_edges, 
-                    edge_agg_type=args.edge_agg_type, index_=index_, args=args)
-        
-    elif config.model == "rgcn":
-        model = RGCN(
-            num_features=n_feats, edge_dim=e_dim, num_relations=8, num_gnn_layers=round(config.n_gnn_layers),
-            n_classes=2, n_hidden=round(config.n_hidden),
-            edge_update=args.emlps, dropout=config.dropout, final_dropout=config.final_dropout, n_bases=None #(maybe)
-        )
-    
+    if not isinstance(sample_batch, HeteroData):
+        d = degree(sample_batch.edge_index[1], dtype=torch.long)
+    else:
+        index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
+        d = degree(index, dtype=torch.long)
+    deg = torch.bincount(d, minlength=1)
+
+    model = MultiMPNN(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, 
+                    n_hidden=round(config.n_hidden), edge_updates=args.emlps, edge_dim=e_dim, 
+                    final_dropout=config.final_dropout, index_=index_, deg=deg, args=args)   
+     
     return model
 
 def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config):
@@ -301,16 +275,16 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
             sample_batch.edge_attr = torch.cat([sample_batch.edge_attr, torch.zeros((sample_batch.edge_attr.shape[0], 2))], dim=1)
 
     model = get_model(sample_batch, config, args)
-
-    if args.reverse_mp:
-        model = to_hetero(model, te_data.metadata(), aggr='mean')
     
     if args.finetune:
         model, optimizer = load_model(model, device, args, config, data_config)
     else:
         model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
-    
+
+    if args.task == 'lp':
+        negative_edge_sampling(sample_batch, args)
+
     sample_batch.to(device)
 
     if isinstance(sample_batch, HeteroData):
@@ -318,18 +292,13 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     else:
         sample_batch.x = sample_batch.x[:, 1:]
 
-    sample_x = sample_batch.x if not isinstance(sample_batch, HeteroData) else sample_batch.x_dict
-    sample_edge_index = sample_batch.edge_index if not isinstance(sample_batch, HeteroData) else sample_batch.edge_index_dict
-    sample_edge_attr = sample_batch.edge_attr if not isinstance(sample_batch, HeteroData) else sample_batch.edge_attr_dict
-    if args.flatten_edges:
-        sample_simp_edge_batch = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch.simp_edge_batch_dict
-    else:
-        sample_simp_edge_batch = None
 
-    logging.info(summary(model, sample_x, sample_edge_index, sample_edge_attr, sample_simp_edge_batch))
+    logging.info(summary(model, sample_batch))
     
     loss_fn = torch.nn.CrossEntropyLoss(weight=torch.FloatTensor([config.w_ce1, config.w_ce2]).to(device))
 
+    if args.task == 'lp':
+        train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
     if args.reverse_mp:
         model = train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
     else:
