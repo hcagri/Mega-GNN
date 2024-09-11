@@ -349,18 +349,19 @@ def negative_edge_sampling(batch, args):
         batch['node', 'to', 'node'].edge_index, batch['node', 'to', 'node'].edge_attr = input_edge_index, input_edge_attr
         batch['node', 'to', 'node'].pos_edge_index, batch['node', 'to', 'node'].pos_edge_attr = pos_edge_index, pos_edge_attr
         batch['node', 'to', 'node'].neg_edge_index, batch['node', 'to', 'node'].neg_edge_attr = neg_edge_index, neg_edge_attr
-        
+        batch['node', 'to', 'node'].timestamps = batch['node', 'to', 'node'].timestamps[~mask]
+
         batch['node', 'to', 'node'].pos_y = torch.ones(pos_edge_index.shape[1]  , dtype=torch.int32)
         batch['node', 'to', 'node'].neg_y = torch.zeros(neg_edge_index.shape[1], dtype=torch.int32)
 
-        batch['node', 'rev_to', 'node'].edge_index = batch['node', 'rev_to', 'node'].edge_index[:, mask_rev]
-        batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[mask_rev, :]
-        batch['node', 'rev_to', 'node'].timestamps = batch['node', 'rev_to', 'node'].timestamps[mask_rev]
-        batch['node', 'rev_to', 'node'].e_id = batch['node', 'rev_to', 'node'].e_id[mask_rev]
+        batch['node', 'rev_to', 'node'].edge_index = batch['node', 'rev_to', 'node'].edge_index[:, ~mask_rev]
+        batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[~mask_rev, :]
+        batch['node', 'rev_to', 'node'].timestamps = batch['node', 'rev_to', 'node'].timestamps[~mask_rev]
+        batch['node', 'rev_to', 'node'].e_id = batch['node', 'rev_to', 'node'].e_id[~mask_rev]
 
         if args.flatten_edges:
             batch['node', 'to', 'node'].simp_edge_batch = batch['node', 'to', 'node'].simp_edge_batch[~mask]
-            batch['node', 'rev_to', 'node'].simp_edge_batch = batch['node', 'rev_to', 'node'].simp_edge_batch[mask_rev]
+            batch['node', 'rev_to', 'node'].simp_edge_batch = batch['node', 'rev_to', 'node'].simp_edge_batch[~mask_rev]
 
     else:
         #TODO
