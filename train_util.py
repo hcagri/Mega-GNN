@@ -10,6 +10,7 @@ import os
 from data_util import assign_ports_with_cpp
 import numpy as np
 import sklearn.metrics
+import negative_sampling
 
 class AddEgoIds(BaseTransform):
     r"""Add IDs to the centre nodes of the batch.
@@ -339,46 +340,11 @@ def negative_edge_sampling(batch, args):
         mask_all = torch.isin(idx, torch.where(counts.gt(1))[0])
         mask_rev = mask_all[len(pos_edges_with_feats):]  # tensor([ True, False, False,  True], device='cuda:0')
         
-        # Initialize an empty list to store negative edges
-        neg_edges = []
-        neg_edge_attrs = []
-
-        nodeset = set(range(batch['node', 'to', 'node'].edge_index.max()+1))
-
-        # Iterate over each positive edge
-        for i, edge in enumerate(pos_edge_index.t()):
-            src, dst = edge[0], edge[1]
-
-            # Chose negative examples in a smart way
-            unavail_mask = (batch['node', 'to', 'node'].edge_index == src).any(dim=0) | (batch['node', 'to', 'node'].edge_index == dst).any(dim=0)
-            unavail_nodes = torch.unique(batch['node', 'to', 'node'].edge_index[:, unavail_mask])
-            unavail_nodes = set(unavail_nodes.tolist())
-            avail_nodes = nodeset - unavail_nodes
-            avail_nodes = torch.tensor(list(avail_nodes))
-            # Finally, emmulate np.random.choice() to chose randomly amongst available nodes
-            indices = torch.randperm(len(avail_nodes))[:64]
-            neg_nodes = avail_nodes[indices]
-            
-            # Generate 32 negative edges with the same source but different destinations
-            neg_dsts = neg_nodes[:32]  # Selecting 32 random destination nodes for the source
-            neg_edges_src = torch.stack([src.repeat(32), neg_dsts], dim=0)
-            
-            # Generate 32 negative edges with the same destination but different sources
-            neg_srcs = neg_nodes[32:]  # Selecting 32 random source nodes for the destination
-            neg_edges_dst = torch.stack([neg_srcs, dst.repeat(32)], dim=0)
-
-            # Add these negative edges to the list
-            neg_edges.append(neg_edges_src)
-            neg_edges.append(neg_edges_dst)
-
-            # Replicate the positive edge attribute for each of the negative edges generated from this edge
-            pos_attr = pos_edge_attr[i].unsqueeze(0)  # Get the attribute of the current positive edge
-            replicated_attr = pos_attr.repeat(64, 1)  # Replicate it 64 times (for each negative edge)
-            neg_edge_attrs.append(replicated_attr)
-
-        # Concatenate all negative edges to form the neg_edge_index
-        neg_edge_index = torch.cat(neg_edges, dim=1)
-        neg_edge_attr = torch.cat(neg_edge_attrs, dim=0)
+         # Sample Negative Edges
+        neg_edges_src, neg_edges_dst = negative_sampling.generate_negative_samples(batch['node', 'to', 'node'].edge_index.tolist(), pos_edge_index.tolist(), 64)
+        
+        neg_edge_index = torch.stack([torch.tensor(neg_edges_src), torch.tensor(neg_edges_dst)], dim=0)
+        neg_edge_attr = pos_edge_attr.repeat_interleave(64,dim=0)
 
         # Update the batch object
         batch['node', 'to', 'node'].edge_index, batch['node', 'to', 'node'].edge_attr = input_edge_index, input_edge_attr

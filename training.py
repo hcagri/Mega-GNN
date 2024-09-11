@@ -160,7 +160,7 @@ def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds
         logging.info(f'****** EPOCH {epoch} ******')
 
         total_loss = total_examples = 0
-        batch_metrics = { 'lr': [], 'loss': [],
+        batch_metrics = { 'loss': [],
                           'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 
                           'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []
                         }
