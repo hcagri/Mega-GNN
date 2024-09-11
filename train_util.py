@@ -221,7 +221,6 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
     
 
     for batch in tqdm.tqdm(loader, disable=not args.tqdm):
-        step+=1
         #remove the unique edge id from the edge features, as it's no longer needed
         batch['node', 'to', 'node'].edge_attr = batch['node', 'to', 'node'].edge_attr[:, 1:]
         batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
