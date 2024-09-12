@@ -264,7 +264,6 @@ class MultiEdgeAggModule(nn.Module):
     def reset_parameters(self):
         self.agg.reset_parameters()
 
-
 class MultiMPNN(torch.nn.Module):
     def __init__(self, num_features, num_gnn_layers, n_classes=2, n_hidden=100, 
                  edge_updates=False,edge_dim=None, final_dropout=0.5, 
@@ -276,6 +275,9 @@ class MultiMPNN(torch.nn.Module):
 
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
+
+        if args.reverse_mp:
+            self.edge_emb_rev = nn.Linear(edge_dim, n_hidden)
     
         self.gnn = GnnHelper(num_gnn_layers=num_gnn_layers, n_hidden=n_hidden, edge_updates=edge_updates, final_dropout=final_dropout,
                              index_=index_, deg=deg, args=args)
@@ -299,7 +301,7 @@ class MultiMPNN(torch.nn.Module):
             x_dict = {"node": self.node_emb(data['node'].x)}
             edge_attr_dict = {
                     ("node", 'to', 'node'): self.edge_emb(data['node', 'to', 'node'].edge_attr), 
-                    ("node", 'rev_to', 'node'): self.edge_emb(data['node', 'rev_to', 'node'].edge_attr),    
+                    ("node", 'rev_to', 'node'): self.edge_emb_rev(data['node', 'rev_to', 'node'].edge_attr),    
                 }
             simp_edge_batch_dict = data.simp_edge_batch_dict if self.args.flatten_edges else None
 
@@ -382,13 +384,16 @@ class GnnHelper(torch.nn.Module):
         self.edge_agg_type = args.edge_agg_type
         self.args = args
 
-        self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=args.edge_agg_type, index=index_)
-
+    
         if args.node_agg_type == 'genagg':
             self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)
         elif args.node_agg_type == 'sum':
             self.node_agg = 'sum'
         
+        if self.edge_agg_type == 'adamm':
+            self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=args.edge_agg_type, index=index_)
+        
+        self.edge_aggrs = nn.ModuleList()
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
@@ -415,6 +420,9 @@ class GnnHelper(torch.nn.Module):
                 nn.ReLU(),
                 nn.Linear(self.n_hidden, self.n_hidden),
             ))
+            if self.flatten_edges:
+                edge_agg = MultiEdgeAggModule(n_hidden, agg_type=args.edge_agg_type, index=index_)
+                self.edge_aggrs.append(edge_agg)
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
         
@@ -436,7 +444,7 @@ class GnnHelper(torch.nn.Module):
 
             for i in range(self.num_gnn_layers):
                 if self.flatten_edges:
-                    n_edge_index, n_edge_attr, inverse_indices  = self.edge_agg(edge_index, edge_attr, simp_edge_batch, times)
+                    n_edge_index, n_edge_attr, inverse_indices  = self.edge_aggrs[i](edge_index, edge_attr, simp_edge_batch, times)
                     x = (x + F.relu(self.batch_norms[i](self.convs[i](x, n_edge_index, n_edge_attr)))) / 2
                     if self.edge_updates: 
                         remapped_edge_attr = torch.index_select(n_edge_attr, 0, inverse_indices) # artificall node attributes 
