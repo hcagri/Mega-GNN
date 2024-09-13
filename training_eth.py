@@ -2,7 +2,7 @@ import torch
 from typing import Union
 import tqdm
 from sklearn.metrics import f1_score
-from train_util import extract_param, save_model, load_model, negative_edge_sampling
+from train_util import extract_param, save_model, load_model, negative_edge_sampling, compute_binary_metrics
 from training import train_hetero_lp
 from data_util import z_norm, assign_ports_with_cpp
 from models import MultiMPNN
@@ -51,8 +51,6 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
 
             pred = out[mask]
             ground_truth = batch['node'].y[mask]
-            preds.append(pred.argmax(dim=-1))
-            ground_truths.append(batch['node'].y[mask])
             loss = loss_fn(pred, ground_truth)
 
             loss.backward()
@@ -60,23 +58,48 @@ def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_ind
 
             total_loss += float(loss) * pred.numel()
             total_examples += pred.numel()
+
+            preds.append(pred.detach().cpu())
+            ground_truths.append(ground_truth.detach().cpu())
             
-        pred = torch.cat(preds, dim=0).detach().cpu().numpy()
-        ground_truth = torch.cat(ground_truths, dim=0).detach().cpu().numpy()
-        f1 = f1_score(ground_truth, pred)
+        pred = torch.cat(preds, dim=0).numpy()
+        ground_truth = torch.cat(ground_truths, dim=0).numpy()
+
+        f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
+
         wandb.log({"f1/train": f1}, step=epoch)
-        logging.info(f'Epoch: {epoch}, Train F1: {f1:.4f}')
+        wandb.log({"precision/train": precision}, step=epoch)
+        wandb.log({"recall/train": recall}, step=epoch)
+        wandb.log({"auc/train": auc}, step=epoch)
+        logging.info(f'Train F1: {f1:.4f}')
+        logging.info(f'Train Precision: {precision:.4f}')
+        logging.info(f'Train Recall: {recall:.4f}')
+        logging.info(f'Train Auc: {auc:.4f}')
 
         #evaluate
-        val_f1 = evaluate_hetero(val_loader, val_inds, model, val_data, device, args)
-        te_f1 = evaluate_hetero(te_loader, te_inds, model, te_data, device, args)
+        val_f1, val_auc, val_precision, val_recall = evaluate_hetero(val_loader, val_inds, model, val_data, device, args)
+        te_f1, te_auc, te_precision, te_recall = evaluate_hetero(te_loader, te_inds, model, te_data, device, args)
 
         wandb.log({"f1/validation": val_f1}, step=epoch)
-        wandb.log({"f1/test": te_f1}, step=epoch)
-        wandb.log({"Loss": total_loss/total_examples}, step=epoch)
-        logging.info(f'Validation F1: {val_f1:.4f}')
-        logging.info(f'Test F1: {te_f1:.4f}')
+        wandb.log({"precision/validation": val_precision}, step=epoch)
+        wandb.log({"recall/validation": val_recall}, step=epoch)
+        wandb.log({"auc/validation": val_auc}, step=epoch)
+        logging.info(f'Val F1: {val_f1:.4f}')
+        logging.info(f'Val Precision: {val_precision:.4f}')
+        logging.info(f'Val Recall: {val_recall:.4f}')
+        logging.info(f'Val Auc: {val_auc:.4f}')
 
+        wandb.log({"f1/test": te_f1}, step=epoch)
+        wandb.log({"precision/test": te_precision}, step=epoch)
+        wandb.log({"recall/test": te_recall}, step=epoch)
+        wandb.log({"auc/test": te_auc}, step=epoch)
+        logging.info(f'Test F1: {te_f1:.4f}')
+        logging.info(f'Test Precision: {te_precision:.4f}')
+        logging.info(f'Test Recall: {te_recall:.4f}')
+        logging.info(f'Test Auc: {te_auc:.4f}')
+
+        wandb.log({"Loss": total_loss/total_examples}, step=epoch)
+        
         if epoch == 0:
             wandb.log({"best_test_f1": te_f1}, step=epoch)
         elif val_f1 > best_val_f1:
@@ -114,15 +137,16 @@ def evaluate_hetero(loader, inds, model, data, device, args):
             out = model(batch)
                 
             out = out[mask]
-            pred = out.argmax(dim=-1)
-            preds.append(pred)
-            ground_truths.append(batch['node'].y[mask])
-    pred = torch.cat(preds, dim=0).cpu().numpy()
-    ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
-    f1 = f1_score(ground_truth, pred)
+            pred = out
+            preds.append(pred.detach().cpu())
+            ground_truths.append(batch['node'].y[mask].detach().cpu())
+
+    pred = torch.cat(preds, dim=0).numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).numpy()
+    f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
 
     model.train()
-    return f1
+    return f1, auc, precision, recall
 
 def get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args):
     ''' 

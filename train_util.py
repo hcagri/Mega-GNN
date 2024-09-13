@@ -106,6 +106,8 @@ def get_loaders(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transfor
 
 @torch.no_grad()
 def evaluate_homo(loader, inds, model, data, device, args):
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
     '''Evaluates the model performane for homogenous graph data.'''
     preds = []
     ground_truths = []
@@ -139,16 +141,20 @@ def evaluate_homo(loader, inds, model, data, device, args):
         
         with torch.no_grad():
             batch.to(device)
+
             out = model(batch)
             out = out[mask]
-            pred = out.argmax(dim=-1)
-            preds.append(pred)
-            ground_truths.append(batch.y[mask])
-    pred = torch.cat(preds, dim=0).cpu().numpy()
-    ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
-    f1 = f1_score(ground_truth, pred)
+            pred = out
+            preds.append(pred.detach().cpu())
+            ground_truths.append(batch.y[mask].detach().cpu())
+            
+    pred = torch.cat(preds, dim=0).numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).numpy()
 
-    return f1
+    # Compute Metrics
+    f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
+    model.train()
+    return f1, auc, precision, recall
 
 @torch.no_grad()
 def evaluate_hetero(loader, inds, model, data, device, args):
@@ -199,15 +205,20 @@ def evaluate_hetero(loader, inds, model, data, device, args):
             out = model(batch)
                 
             out = out[mask]
-            pred = out.argmax(dim=-1)
-            preds.append(pred)
-            ground_truths.append(batch['node', 'to', 'node'].y[mask])
-    pred = torch.cat(preds, dim=0).cpu().numpy()
-    ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
-    f1 = f1_score(ground_truth, pred)
+            pred = out
+
+            preds.append(pred.detach().cpu())
+            ground_truths.append(batch['node', 'to', 'node'].y[mask].detach().cpu())
+
+    pred = torch.cat(preds, dim=0).numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).numpy()
+
+    # Compute Metrics
+    f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
+
 
     model.train()
-    return f1
+    return f1, auc, precision, recall
 
 @torch.no_grad()
 def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
@@ -461,3 +472,23 @@ def lp_compute_metrics(pos_pred, neg_pred, pos_labels, neg_labels) -> dict[str, 
     pos_f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     
     return { 'lp_mean_acc': mean_accuracy, 'lp_pos_f1': pos_f1 }
+
+
+def compute_binary_metrics(preds: np.array, labels: np.array):
+    """
+    Computes metrics based on raw/ normalized model predictions
+    :param preds: Raw (or normalized) predictions (can vary threshold here if raw scores are provided)
+    :param labels: Binary target labels
+    :return: Accuracy, illicit precision/ recall/ F1, and ROC AUC scores
+    """
+    probs = preds[:,1]
+    preds = preds.argmax(axis=-1)
+
+    precisions, recalls, _ = sklearn.metrics.precision_recall_curve(labels, probs) # probs: probabilities for the positive class
+    f1 = sklearn.metrics.f1_score(labels, preds, zero_division=0)
+    auc = sklearn.metrics.auc(recalls, precisions)
+
+    precision = sklearn.metrics.precision_score(labels, preds, zero_division=0)
+    recall = sklearn.metrics.recall_score(labels, preds, zero_division=0)
+
+    return f1, auc, precision, recall

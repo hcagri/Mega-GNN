@@ -40,7 +40,7 @@ def main():
     #define a model config dictionary and wandb logging at the same time
     wandb.init(
         mode="disabled" if args.testing else "online",
-        project="your_proj_name", #replace this with your wandb project name if you want to use wandb logging
+        project="ICLR", #replace this with your wandb project name if you want to use wandb logging
         entity="hcbilgi",
         config={
             "epochs": args.n_epochs,
