@@ -318,16 +318,26 @@ def get_model(sample_batch, config, args):
     n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
     e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
     
-    try:
+    if args.flatten_edges:
         index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
-    except:
-        index_ = None
-
-    if not isinstance(sample_batch, HeteroData):
-        d = degree(sample_batch.edge_index[1], dtype=torch.long)
     else:
-        index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
-        d = degree(index, dtype=torch.long)
+        index_ = None
+    
+    if args.flatten_edges:
+         # Instead of in-degree use Fan-in
+        if not isinstance(sample_batch, HeteroData):
+            s_edges = torch.unique(sample_batch.edge_index, dim=1)
+            d = degree(s_edges[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+        else:
+            s_edges = torch.unique(torch.cat((sample_batch['node', 'to', 'node'].edge_index, sample_batch['node', 'rev_to', 'node'].edge_index), 1), dim=1)
+            d = degree(s_edges[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+    else:
+        if not isinstance(sample_batch, HeteroData):
+            d = degree(sample_batch.edge_index[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+        else:
+            index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
+            d = degree(index, num_nodes=sample_batch.num_nodes, dtype=torch.long)
+
     deg = torch.bincount(d, minlength=1)
 
     model = MultiMPNN(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, 
@@ -351,7 +361,7 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     add_arange_ids([tr_data, val_data, te_data])
 
     tr_loader, val_loader, te_loader = get_loaders(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args)
-
+    
     #get the model
     sample_batch = next(iter(tr_loader))
 

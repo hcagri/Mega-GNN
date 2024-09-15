@@ -1,7 +1,7 @@
 {
   "gin": {
     "params": {
-      "lr": 0.0006213266113989207, "n_hidden": 32, "n_mlp_layers": 1, "n_gnn_layers": 2, "loss": "ce",
+      "lr": 0.005213266113989207, "n_hidden": 64, "n_mlp_layers": 1, "n_gnn_layers": 2, "loss": "ce",
       "w_ce1": 1.0000182882773443, "w_ce2": 6.275014431494497, "norm_method": "z_normalize", "dropout": 0.00983468338330501, "final_dropout": 0.10527690625126304
     },
     "bayes_opt_params": {

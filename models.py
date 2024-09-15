@@ -237,8 +237,8 @@ class MultiEdgeAggModule(nn.Module):
         elif agg_type == 'gin':
             self.agg = GinAgg(n_hidden=n_hidden)
         elif agg_type == 'pna':
-            d = degree(index, dtype=torch.long)
-            deg = torch.bincount(d, minlength=1)[1:] # discard the value count for 0
+            d = degree(index, num_nodes=torch.unique(index).numel(), dtype=torch.long)
+            deg = torch.bincount(d, minlength=1)
             self.agg = PnaAgg(n_hidden=n_hidden, deg=deg)
         elif agg_type == 'sum':
             self.agg = SumAgg()
