@@ -124,7 +124,7 @@ def train_hetero(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, m
             ''' Add port numberings after neighborhood sampling. ''' 
             if args.ports and args.ports_batch:
                 # To be consistent, sample the edges for forward and backward edge types.
-                assign_ports_with_cpp(batch) 
+                assign_ports_with_cpp(batch, process_batch=True) 
             
             optimizer.zero_grad()
             #select the seed edges from which the batch was created

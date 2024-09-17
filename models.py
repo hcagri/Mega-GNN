@@ -237,7 +237,8 @@ class MultiEdgeAggModule(nn.Module):
         elif agg_type == 'gin':
             self.agg = GinAgg(n_hidden=n_hidden)
         elif agg_type == 'pna':
-            d = degree(index, num_nodes=torch.unique(index).numel(), dtype=torch.long)
+            uniq_index, inverse_indices = torch.unique(index, return_inverse=True)
+            d = degree(inverse_indices, num_nodes=uniq_index.numel(), dtype=torch.long)
             deg = torch.bincount(d, minlength=1)
             self.agg = PnaAgg(n_hidden=n_hidden, deg=deg)
         elif agg_type == 'sum':
@@ -389,10 +390,7 @@ class GnnHelper(torch.nn.Module):
             self.node_agg = GenAgg(f=MLPAutoencoder, jit=False)
         elif args.node_agg_type == 'sum':
             self.node_agg = 'sum'
-        
-        if self.edge_agg_type == 'adamm':
-            self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=args.edge_agg_type, index=index_)
-        
+     
         self.edge_aggrs = nn.ModuleList()
         self.convs = nn.ModuleList()
         self.emlps = nn.ModuleList()
@@ -425,6 +423,11 @@ class GnnHelper(torch.nn.Module):
                 self.edge_aggrs.append(edge_agg)
             self.convs.append(conv)
             self.batch_norms.append(BatchNorm(n_hidden))
+        
+
+        if self.edge_agg_type == 'adamm':
+            self.edge_aggrs = None
+            self.edge_agg = MultiEdgeAggModule(n_hidden, agg_type=args.edge_agg_type, index=index_)
         
 
     def forward(self, x, edge_index, edge_attr, simp_edge_batch=None):

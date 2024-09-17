@@ -29,7 +29,7 @@ def main():
     elif args.task == 'node_class':
         assert args.data in ['ETH', 'ETH-Kaggle']
     if args.edge_agg_type == 'adamm':
-        assert args.task == 'node_class'
+        assert args.task == 'node_class' or args.task == 'lp'
 
     #set seed
     if args.seed == 1:
