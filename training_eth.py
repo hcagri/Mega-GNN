@@ -15,11 +15,110 @@ import wandb
 import logging
 import os
 
+def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
+    #training
+    best_val_f1 = 0
+    
+    for epoch in range(config.epochs):
+        logging.info(f"---------- Epoch {epoch} ----------")
+        
+        total_loss = total_examples = 0
+        preds = []
+        ground_truths = []
+        
+        assert model.training, "Training error: Model is not in training mode"
+
+        for batch in tqdm.tqdm(tr_loader, disable=not args.tqdm):
+            ''' Add port numberings after neighborhood sampling. ''' 
+            if args.ports and args.ports_batch:
+                # To be consistent, sample the edges for forward and backward edge types.
+                assign_ports_with_cpp(batch) 
+            
+            optimizer.zero_grad()
+
+            # select the seed nodes (previously edges) from which the batch was created
+            # This will correspond to the first batch_size nodes, which are the seed nodes.
+            inds = tr_inds.detach().cpu()
+            batch_node_inds = inds[batch.input_id.detach().cpu()]
+            batch_node_ids = tr_loader.data.x.detach().cpu()[batch_node_inds, 0]
+            mask = torch.isin(batch.x[:, 0].detach().cpu(), batch_node_ids)
+            
+            #remove the unique node id from the node features, as it's no longer needed
+            batch.x = batch.x[:, 1:]
+
+            batch.to(device)
+
+            out = model(batch)
+
+            pred = out[mask]
+            ground_truth = batch.y[mask]
+            loss = loss_fn(pred, ground_truth)
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += float(loss) * pred.numel()
+            total_examples += pred.numel()
+
+            preds.append(pred.detach().cpu())
+            ground_truths.append(ground_truth.detach().cpu())
+
+            
+        pred = torch.cat(preds, dim=0).numpy()
+        ground_truth = torch.cat(ground_truths, dim=0).numpy()
+
+        f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
+
+        wandb.log({"f1/train": f1}, step=epoch)
+        wandb.log({"precision/train": precision}, step=epoch)
+        wandb.log({"recall/train": recall}, step=epoch)
+        wandb.log({"auc/train": auc}, step=epoch)
+        logging.info(f'Train F1: {f1:.4f}')
+        logging.info(f'Train Precision: {precision:.4f}')
+        logging.info(f'Train Recall: {recall:.4f}')
+        logging.info(f'Train Auc: {auc:.4f}')
+
+        #evaluate
+        val_f1, val_auc, val_precision, val_recall = evaluate_homo(val_loader, val_inds, model, val_data, device, args)
+        te_f1, te_auc, te_precision, te_recall = evaluate_homo(te_loader, te_inds, model, te_data, device, args)
+
+        wandb.log({"f1/validation": val_f1}, step=epoch)
+        wandb.log({"precision/validation": val_precision}, step=epoch)
+        wandb.log({"recall/validation": val_recall}, step=epoch)
+        wandb.log({"auc/validation": val_auc}, step=epoch)
+        logging.info(f'Val F1: {val_f1:.4f}')
+        logging.info(f'Val Precision: {val_precision:.4f}')
+        logging.info(f'Val Recall: {val_recall:.4f}')
+        logging.info(f'Val Auc: {val_auc:.4f}')
+
+        wandb.log({"f1/test": te_f1}, step=epoch)
+        wandb.log({"precision/test": te_precision}, step=epoch)
+        wandb.log({"recall/test": te_recall}, step=epoch)
+        wandb.log({"auc/test": te_auc}, step=epoch)
+        logging.info(f'Test F1: {te_f1:.4f}')
+        logging.info(f'Test Precision: {te_precision:.4f}')
+        logging.info(f'Test Recall: {te_recall:.4f}')
+        logging.info(f'Test Auc: {te_auc:.4f}')
+
+        wandb.log({"Loss": total_loss/total_examples}, step=epoch)
+        
+        if epoch == 0:
+            wandb.log({"best_test_f1": te_f1}, step=epoch)
+        elif val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            wandb.log({"best_test_f1": te_f1}, step=epoch)
+            if args.save_model:
+                save_model(model, optimizer, epoch, args, data_config)
+        
+    return model
+
+
 
 def train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config):
     #training
     best_val_f1 = 0
     for epoch in range(config.epochs):
+        logging.info(f"---------- Epoch {epoch} ----------")
         total_loss = total_examples = 0
         preds = []
         ground_truths = []
@@ -148,6 +247,45 @@ def evaluate_hetero(loader, inds, model, data, device, args):
     model.train()
     return f1, auc, precision, recall
 
+@torch.no_grad()
+def evaluate_homo(loader, inds, model, data, device, args):
+    '''Evaluates the model performane for heterogenous graph data.'''
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
+
+    preds = []
+    ground_truths = []
+    for batch in tqdm.tqdm(loader, disable=not args.tqdm):
+        #select the seed edges from which the batch was created
+        
+        if args.ports and args.ports_batch:
+            assign_ports_with_cpp(batch) 
+    
+        inds = inds.detach().cpu()
+        batch_node_inds = inds[batch.input_id.detach().cpu()]
+        batch_node_ids = loader.data.x.detach().cpu()[batch_node_inds, 0]
+        mask = torch.isin(batch.x[:, 0].detach().cpu(), batch_node_ids)
+
+        #remove the unique node id from the node features, as it's no longer needed
+        batch.x = batch.x[:, 1:]
+        
+        with torch.no_grad():
+            batch.to(device)
+            out = model(batch)
+                
+            out = out[mask]
+            pred = out
+            preds.append(pred.detach().cpu())
+            ground_truths.append(batch.y[mask].detach().cpu())
+
+    pred = torch.cat(preds, dim=0).numpy()
+    ground_truth = torch.cat(ground_truths, dim=0).numpy()
+    f1, auc, precision, recall = compute_binary_metrics(pred, ground_truth)
+
+    model.train()
+    return f1, auc, precision, recall
+
+
 def get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args):
     ''' 
         Sampled nodes are sorted based on the order in which they were sampled. In particular, the first batch_size nodes represent 
@@ -242,7 +380,7 @@ class AddEgoIds(BaseTransform):
             nodes = torch.isin(data['node'].n_id, data['node'].input_id).to(device)
         ids[nodes] = 1
         if not isinstance(data, HeteroData):
-            data.x = torch.cat([x.view(-1, 1), ids], dim=1)
+            data.x = torch.cat([x, ids], dim=1)
         else: 
             # data['node'].x = torch.cat([x.view(-1, 1), ids], dim=1)
             data['node'].x = torch.cat([x, ids], dim=1)
@@ -253,16 +391,26 @@ def get_model(sample_batch, config, args):
     n_feats = (sample_batch.x.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node'].x.shape[1] - 1)
     e_dim = sample_batch.edge_attr.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].edge_attr.shape[1]
     
-    try:
+    if args.flatten_edges:
         index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
-    except:
-        index_ = None
-
-    if not isinstance(sample_batch, HeteroData):
-        d = degree(sample_batch.edge_index[1], dtype=torch.long)
     else:
-        index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
-        d = degree(index, dtype=torch.long)
+        index_ = None
+    
+    if args.flatten_edges:
+         # Instead of in-degree use Fan-in
+        if not isinstance(sample_batch, HeteroData):
+            s_edges = torch.unique(sample_batch.edge_index, dim=1)
+            d = degree(s_edges[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+        else:
+            s_edges = torch.unique(torch.cat((sample_batch['node', 'to', 'node'].edge_index, sample_batch['node', 'rev_to', 'node'].edge_index), 1), dim=1)
+            d = degree(s_edges[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+    else:
+        if not isinstance(sample_batch, HeteroData):
+            d = degree(sample_batch.edge_index[1], num_nodes=sample_batch.num_nodes, dtype=torch.long)
+        else:
+            index = torch.cat((sample_batch['node', 'to', 'node'].edge_index[1], sample_batch['node', 'rev_to', 'node'].edge_index[1]), 0)
+            d = degree(index, num_nodes=sample_batch.num_nodes, dtype=torch.long)
+
     deg = torch.bincount(d, minlength=1)
 
     model = MultiMPNN(num_features=n_feats, num_gnn_layers=config.n_gnn_layers, n_classes=2, 
@@ -284,6 +432,9 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
 
     #add the unique ids to later find the seed edges
     add_arange_ids([tr_data, val_data, te_data])
+
+    if args.edge_agg_type=='adamm':
+        tr_data, val_data, te_data = ToMultigraph(tr_data), ToMultigraph(val_data), ToMultigraph(te_data)
 
     tr_loader, val_loader, te_loader = get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args)
 
@@ -326,6 +477,45 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     if args.reverse_mp:
         model = train_hetero_eth(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
     else:
-        raise NotImplementedError("Model without reverseMP not implemented!")
+        model = train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
+
     
     wandb.finish()
+
+
+
+def ToMultigraph(data): 
+    x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+    
+    # create full edge_index, assume that original input edge_index is single direction directed, mult-edge is allowed
+    self_loop_indice = edge_index[0] == edge_index[1]
+    self_loops = edge_index[:, self_loop_indice]
+    other_edges = edge_index[:, ~self_loop_indice]
+    reversed_other_edges = torch.stack([other_edges[1], other_edges[0]])
+
+    edge_index = torch.cat([self_loops, other_edges, reversed_other_edges], dim=-1)
+    if edge_attr is not None:
+        edge_attr = torch.cat([edge_attr[self_loop_indice], edge_attr[~self_loop_indice], edge_attr[~self_loop_indice]], dim=0)
+    edge_direction = torch.cat([torch.full((self_loops.size(-1),), 0), torch.full((other_edges.size(-1),), 1), torch.full((reversed_other_edges.size(-1),), 2)], dim=0)
+    
+    # map to simplified edge, currently ignore the edge direction (this is fine)
+    simplified_edge_mapping = {}
+    simplified_edge_batch = []
+    i = 0
+    for edge in edge_index.T:
+        # transform edge to tuple
+        tuple_edge = tuple(edge.tolist())
+        if tuple_edge not in simplified_edge_mapping:
+            simplified_edge_mapping[tuple_edge] = i
+
+            # simplified_edge_index.append(edge)
+            # simplified_edge_mapping[tuple_edge[::-1]] = i+1 #
+            i += 1
+        simplified_edge_batch.append(simplified_edge_mapping[tuple_edge])
+    simplified_edge_batch = torch.LongTensor(simplified_edge_batch)
+
+    data.edge_index = edge_index
+    data.edge_attr = edge_attr
+    data.edge_direction = edge_direction
+    data.simp_edge_batch = simplified_edge_batch
+    return data

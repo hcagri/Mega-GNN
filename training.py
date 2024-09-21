@@ -316,7 +316,7 @@ def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds
 
 def get_model(sample_batch, config, args):
     n_feats = sample_batch.x.shape[1] if not isinstance(sample_batch, HeteroData) else sample_batch['node'].x.shape[1]
-    e_dim = (sample_batch.edge_attr.shape[1] - 1) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1] - 1)
+    e_dim = (sample_batch.edge_attr.shape[1]) if not isinstance(sample_batch, HeteroData) else (sample_batch['node', 'to', 'node'].edge_attr.shape[1])
     
     if args.flatten_edges:
         index_ = sample_batch.simp_edge_batch if not isinstance(sample_batch, HeteroData) else sample_batch['node', 'to', 'node'].simp_edge_batch
@@ -365,6 +365,15 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     #get the model
     sample_batch = next(iter(tr_loader))
 
+    if isinstance(sample_batch, HeteroData):
+        sample_batch['node', 'to', 'node'].edge_attr = sample_batch['node', 'to', 'node'].edge_attr[:, 1:]
+        sample_batch['node', 'rev_to', 'node'].edge_attr = sample_batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
+    else:
+        sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
+
+    if args.task == 'lp':
+        negative_edge_sampling(sample_batch, args)
+
     if args.ports and args.ports_batch:
         # Add a placeholder for the port features so that the model is loaded correctly!
         if isinstance(sample_batch, HeteroData):
@@ -381,15 +390,6 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
         model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     
-    if isinstance(sample_batch, HeteroData):
-        sample_batch['node', 'to', 'node'].edge_attr = sample_batch['node', 'to', 'node'].edge_attr[:, 1:]
-        sample_batch['node', 'rev_to', 'node'].edge_attr = sample_batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
-    else:
-        sample_batch.edge_attr = sample_batch.edge_attr[:, 1:]
-
-    if args.task == 'lp':
-        negative_edge_sampling(sample_batch, args)
-
     sample_batch.to(device)
 
     logging.info(summary(model, sample_batch))

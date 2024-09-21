@@ -15,6 +15,24 @@ import math
 import time
 
 
+class DiscreteEncoder(nn.Module):
+    def __init__(self, hidden_channels, max_num_features=10, max_num_values=500): #10
+        super().__init__()
+        self.embeddings = nn.ModuleList([nn.Embedding(max_num_values, hidden_channels) 
+                    for i in range(max_num_features)])
+
+    def reset_parameters(self):
+        for embedding in self.embeddings:
+            embedding.reset_parameters()
+            
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(1)
+        out = 0
+        for i in range(x.size(1)):
+            out = out + self.embeddings[i](x[:, i])
+        return out
+    
 class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -279,6 +297,9 @@ class MultiMPNN(torch.nn.Module):
 
         if args.reverse_mp:
             self.edge_emb_rev = nn.Linear(edge_dim, n_hidden)
+
+        if args.edge_agg_type =='adamm':
+            self.edge_direction_encoder = DiscreteEncoder(n_hidden, max_num_values=4)
     
         self.gnn = GnnHelper(num_gnn_layers=num_gnn_layers, n_hidden=n_hidden, edge_updates=edge_updates, final_dropout=final_dropout,
                              index_=index_, deg=deg, args=args)
@@ -293,6 +314,9 @@ class MultiMPNN(torch.nn.Module):
             self.mlp = nn.Sequential(Linear(n_hidden, 50), nn.ReLU(), nn.Dropout(self.final_dropout),Linear(50, 25), nn.ReLU(), nn.Dropout(self.final_dropout),
                                 Linear(25, n_classes))
         elif args.task == 'lp':
+            if args.ports_batch:
+                # positive and negative edges do not contain port information, since ports are assigned after neighborhood sampling.
+                self.edge_emb_new = nn.Linear(edge_dim-2, n_hidden)
             self.edge_readout = LinkPredHead(n_hidden=n_hidden, n_classes=1, final_dropout=final_dropout)
     
     def forward(self, data):
@@ -319,8 +343,12 @@ class MultiMPNN(torch.nn.Module):
             elif self.args.task == 'node_class':
                 out = self.mlp(x)
             elif self.args.task == 'lp':
-                neg_edge_attr = self.edge_emb(data['node', 'to', 'node'].neg_edge_attr)
-                pos_edge_attr = self.edge_emb(data['node', 'to', 'node'].pos_edge_attr)
+                if self.args.ports_batch:
+                    neg_edge_attr = self.edge_emb_new(data['node', 'to', 'node'].neg_edge_attr) 
+                    pos_edge_attr = self.edge_emb_new(data['node', 'to', 'node'].pos_edge_attr)
+                else:
+                    neg_edge_attr = self.edge_emb(data['node', 'to', 'node'].neg_edge_attr) 
+                    pos_edge_attr = self.edge_emb(data['node', 'to', 'node'].pos_edge_attr)
                 out = self.edge_readout(x, data['node', 'to', 'node'].pos_edge_index, pos_edge_attr, data['node', 'to', 'node'].neg_edge_index, neg_edge_attr)
 
         else:
@@ -328,6 +356,9 @@ class MultiMPNN(torch.nn.Module):
             x = self.node_emb(data.x)
             edge_attr = self.edge_emb(data.edge_attr) 
             simp_edge_batch = data.simp_edge_batch if self.args.flatten_edges else None
+
+            if self.args.edge_agg_type =='adamm':
+                edge_attr = edge_attr + self.edge_direction_encoder(data.edge_direction)
 
             # Message Passing Layers
             x, edge_attr = self.gnn(x, data.edge_index, edge_attr, simp_edge_batch)

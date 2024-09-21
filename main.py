@@ -29,6 +29,7 @@ def main():
     elif args.task == 'node_class':
         assert args.data in ['ETH', 'ETH-Kaggle']
     if args.edge_agg_type == 'adamm':
+        assert args.reverse_mp == False
         assert args.task == 'node_class' or args.task == 'lp'
 
     #set seed
@@ -36,12 +37,21 @@ def main():
         args.seed = random.randint(2, 256000)
 
     set_seed(args.seed)
+    if args.flatten_edges:
+        name = f"{args.data} | {args.model}+EdgeAgg={args.edge_agg_type}"
+    else:
+        name = f"{args.data} | Multi-{args.model}"
+        if args.ports_batch:
+            name += " Ports Batch"
+    if args.node_agg_type == 'GenAgg':
+        name += " NodeAgg=GenAgg"
 
     #define a model config dictionary and wandb logging at the same time
     wandb.init(
         mode="disabled" if args.testing else "online",
         project="ICLR", #replace this with your wandb project name if you want to use wandb logging
         entity="hcbilgi",
+        name=name,
         config={
             "epochs": args.n_epochs,
             "batch_size": args.batch_size,
