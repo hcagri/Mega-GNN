@@ -236,7 +236,9 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
         batch['node', 'to', 'node'].edge_attr = batch['node', 'to', 'node'].edge_attr[:, 1:]
         batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
 
-        negative_edge_sampling(batch, args)
+        ind_mask = batch['node', 'to', 'node'].e_id > inds[0]
+        negative_edge_sampling(batch, args, ind_mask)
+
         if args.ports and args.ports_batch:
             # To be consistent, sample the edges for forward and backward edge types.
             assign_ports_with_cpp(batch) 
@@ -308,7 +310,7 @@ def load_model(model, device, args, config, data_config):
     return model, optimizer
 
 
-def negative_edge_sampling(batch, args):
+def negative_edge_sampling(batch, args, inds_mask=None):
 
     '''
         Sample positive and negative edges from given subgraph for link prediction objective
@@ -319,9 +321,13 @@ def negative_edge_sampling(batch, args):
     if isinstance(batch, HeteroData):
         #1. add the negative samples
         E = batch['node', 'to', 'node'].edge_index.shape[1]
-
+        
         positions = torch.arange(E)
-        drop_count = min(args.batch_size, int(len(positions) * 0.15)) # 15% probability to drop an edge or maximally 200 edges
+        if inds_mask is not None:
+            # for validation and test only select the positive edges from validation or test graph edges. Do not select training edges as positive edges in evaluation.
+            positions = positions[inds_mask] 
+
+        drop_count = min(args.batch_size, int(len(positions) * 0.15)) # 15% probability to drop an edge or maximally args.batch_size edges
         if len(positions) > 0 and drop_count > 0:
             drop_idxs = torch.multinomial(torch.full((len(positions),), 1.0), drop_count, replacement=False) #[drop_count, ]
         else:

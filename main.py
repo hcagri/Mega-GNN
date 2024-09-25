@@ -43,7 +43,7 @@ def main():
         name = f"{args.data} | Multi-{args.model}"
         if args.ports_batch:
             name += " Ports Batch"
-    if args.node_agg_type == 'GenAgg':
+    if args.node_agg_type == 'genagg':
         name += " NodeAgg=GenAgg"
 
     #define a model config dictionary and wandb logging at the same time

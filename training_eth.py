@@ -33,6 +33,9 @@ def train_homo(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, mod
             if args.ports and args.ports_batch:
                 # To be consistent, sample the edges for forward and backward edge types.
                 assign_ports_with_cpp(batch) 
+
+            if args.edge_agg_type=='adamm':
+                batch = ToMultigraph(batch)
             
             optimizer.zero_grad()
 
@@ -260,6 +263,8 @@ def evaluate_homo(loader, inds, model, data, device, args):
         
         if args.ports and args.ports_batch:
             assign_ports_with_cpp(batch) 
+        if args.edge_agg_type=='adamm':
+            batch = ToMultigraph(batch)
     
         inds = inds.detach().cpu()
         batch_node_inds = inds[batch.input_id.detach().cpu()]
@@ -433,9 +438,6 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     #add the unique ids to later find the seed edges
     add_arange_ids([tr_data, val_data, te_data])
 
-    if args.edge_agg_type=='adamm':
-        tr_data, val_data, te_data = ToMultigraph(tr_data), ToMultigraph(val_data), ToMultigraph(te_data)
-
     tr_loader, val_loader, te_loader = get_loaders_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, transform, args)
 
     #get the model
@@ -460,6 +462,9 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     if args.task == 'lp':
         negative_edge_sampling(sample_batch, args)
 
+    if args.edge_agg_type=='adamm':
+        sample_batch = ToMultigraph(sample_batch)
+    
     sample_batch.to(device)
 
     if isinstance(sample_batch, HeteroData):
