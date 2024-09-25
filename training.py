@@ -348,7 +348,7 @@ def get_model(sample_batch, config, args):
 
 def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data_config):
     #set device
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")    
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")    
     config = wandb.config
 
     #set the transform if ego ids should be used

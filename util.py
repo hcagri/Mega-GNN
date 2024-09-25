@@ -41,6 +41,7 @@ def create_parser():
     parser.add_argument("--flatten_edges", action='store_true', help="Flatten parallel edges")
 
     #Misc
+    parser.add_argument("--device", default="cuda:0", type=str, help="Select a GPU", required=False)
     parser.add_argument("--seed", default=1, type=int, help="Select the random seed for reproducability")
     parser.add_argument("--tqdm", action='store_true', help="Use tqdm logging (when running interactively in terminal)")
     parser.add_argument("--data", default=None, type=str, help="Select the AML dataset. Needs to be either small or medium.", required=True)
