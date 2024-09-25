@@ -371,8 +371,13 @@ class MultiMPNN(torch.nn.Module):
             elif self.args.task == 'node_class':
                 out = self.mlp(x)
             elif self.args.task == 'lp':
-                raise NotImplementedError("Link Prediction objective is not yet implemented without Reverse MP! ")
-        
+                if self.args.ports_batch:
+                    neg_edge_attr = self.edge_emb_new(data.neg_edge_attr) 
+                    pos_edge_attr = self.edge_emb_new(data.pos_edge_attr)
+                else:
+                    neg_edge_attr = self.edge_emb(data.neg_edge_attr) 
+                    pos_edge_attr = self.edge_emb(data.pos_edge_attr)
+                out = self.edge_readout(x, data.pos_edge_index, pos_edge_attr, data.neg_edge_index, neg_edge_attr)
         return out
 
 class LinkPredHead(torch.nn.Module):

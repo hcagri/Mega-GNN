@@ -2,7 +2,7 @@ import torch
 from typing import Union
 import tqdm
 from sklearn.metrics import f1_score
-from train_util import extract_param, save_model, load_model, negative_edge_sampling, compute_binary_metrics
+from train_util import extract_param, save_model, load_model, negative_edge_sampling, compute_binary_metrics, ToMultigraph
 from training import train_hetero_lp
 from data_util import z_norm, assign_ports_with_cpp
 from models import MultiMPNN
@@ -488,39 +488,3 @@ def train_gnn_eth(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, 
     wandb.finish()
 
 
-
-def ToMultigraph(data): 
-    x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-    
-    # create full edge_index, assume that original input edge_index is single direction directed, mult-edge is allowed
-    self_loop_indice = edge_index[0] == edge_index[1]
-    self_loops = edge_index[:, self_loop_indice]
-    other_edges = edge_index[:, ~self_loop_indice]
-    reversed_other_edges = torch.stack([other_edges[1], other_edges[0]])
-
-    edge_index = torch.cat([self_loops, other_edges, reversed_other_edges], dim=-1)
-    if edge_attr is not None:
-        edge_attr = torch.cat([edge_attr[self_loop_indice], edge_attr[~self_loop_indice], edge_attr[~self_loop_indice]], dim=0)
-    edge_direction = torch.cat([torch.full((self_loops.size(-1),), 0), torch.full((other_edges.size(-1),), 1), torch.full((reversed_other_edges.size(-1),), 2)], dim=0)
-    
-    # map to simplified edge, currently ignore the edge direction (this is fine)
-    simplified_edge_mapping = {}
-    simplified_edge_batch = []
-    i = 0
-    for edge in edge_index.T:
-        # transform edge to tuple
-        tuple_edge = tuple(edge.tolist())
-        if tuple_edge not in simplified_edge_mapping:
-            simplified_edge_mapping[tuple_edge] = i
-
-            # simplified_edge_index.append(edge)
-            # simplified_edge_mapping[tuple_edge[::-1]] = i+1 #
-            i += 1
-        simplified_edge_batch.append(simplified_edge_mapping[tuple_edge])
-    simplified_edge_batch = torch.LongTensor(simplified_edge_batch)
-
-    data.edge_index = edge_index
-    data.edge_attr = edge_attr
-    data.edge_direction = edge_direction
-    data.simp_edge_batch = simplified_edge_batch
-    return data

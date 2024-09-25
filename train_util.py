@@ -287,6 +287,76 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
     model.train()
     return eval_metrics
 
+@torch.no_grad()
+def evaluate_homo_lp(loader, inds, model, data, device, args, mode='eval'):
+    '''Evaluates the model performane for heterogenous graph data.'''
+    model.eval()
+    assert not model.training, "Test error: Model is not in evaluation mode"
+
+    eval_preds_labels = {"pos_pred": [], "neg_pred": [], "pos_labels": [], "neg_labels": []}
+    batch_metrics = { 'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 
+                     'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []}
+    
+
+    for batch in tqdm.tqdm(loader, disable=not args.tqdm):
+        #remove the unique edge id from the edge features, as it's no longer needed
+        batch.edge_attr = batch.edge_attr[:, 1:]
+
+        ind_mask = batch.e_id > inds[0]
+        negative_edge_sampling(batch, args, ind_mask)
+
+        if args.edge_agg_type=='adamm':
+            batch = ToMultigraph(batch)
+
+        if args.ports and args.ports_batch:
+            # To be consistent, sample the edges for forward and backward edge types.
+            assign_ports_with_cpp(batch) 
+        
+        with torch.no_grad():
+            batch.to(device)
+            out = model(batch)
+
+            pos_labels = batch.pos_y
+            pos_pred = out[0]
+            neg_labels = batch.neg_y
+            neg_pred = out[1]
+
+            # Free some GPU memory
+            pos_pred, neg_pred, pos_labels, neg_labels = pos_pred.detach().cpu(), neg_pred.detach().cpu(), pos_labels.detach().cpu(), neg_labels.detach().cpu()
+            
+            # GNN predictions and metrics (link prediction)
+            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,5,10])
+            gnn_auc = compute_auc(pos_pred, neg_pred, pos_labels, neg_labels)
+            for key in gnn_hits_dict:
+                batch_metrics['lp_'+key].append(gnn_hits_dict[key])
+            batch_metrics['lp_mrr'].append(gnn_mrr)
+            batch_metrics['lp_auc'].append(gnn_auc)
+            gnn_preds_labels = gnn_get_predictions_and_labels(pos_pred, neg_pred, pos_labels, neg_labels)
+            lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+            for key in lp_metrics:
+                batch_metrics[key].append(lp_metrics[key])
+            for k, v in gnn_preds_labels.items(): 
+                eval_preds_labels[k].extend(v.tolist())
+        
+
+    ## Compute eval metrics
+    if mode == 'eval':
+        eval_metrics = {f'ev_{met}': np.mean(batch_metrics[met]) for met in ['lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        eval_preds_labels = {k: np.array(v) for k, v in eval_preds_labels.items()}
+        lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+        for k, v in lp_metrics.items():
+            eval_metrics['ev_' + k] = v
+    elif mode == 'test':
+        eval_metrics = {f'te_{met}': np.mean(batch_metrics[met]) for met in ['lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        eval_preds_labels = {k: np.array(v) for k, v in eval_preds_labels.items()}
+        lp_metrics = lp_compute_metrics(**gnn_preds_labels)
+        for k, v in lp_metrics.items():
+            eval_metrics['te_' + k] = v
+
+    model.train()
+    return eval_metrics
+
+
 def save_model(model, optimizer, epoch, args, data_config):
     # Save the model in a dictionary
     if not os.path.exists(os.path.join(f'{data_config["paths"]["model_to_save"]}', args.unique_name)):
@@ -381,9 +451,47 @@ def negative_edge_sampling(batch, args, inds_mask=None):
             batch['node', 'rev_to', 'node'].simp_edge_batch = batch['node', 'rev_to', 'node'].simp_edge_batch[~mask_rev]
 
     else:
-        #TODO
-        raise NotImplementedError('Link prediction without Reverse MP is not implemented!')
+        #1. add the negative samples
+        E = batch.edge_index.shape[1]
+        
+        positions = torch.arange(E)
+        if inds_mask is not None:
+            # for validation and test only select the positive edges from validation or test graph edges. Do not select training edges as positive edges in evaluation.
+            positions = positions[inds_mask] 
 
+        drop_count = min(args.batch_size, int(len(positions) * 0.15)) # 15% probability to drop an edge or maximally args.batch_size edges
+        if len(positions) > 0 and drop_count > 0:
+            drop_idxs = torch.multinomial(torch.full((len(positions),), 1.0), drop_count, replacement=False) #[drop_count, ]
+        else:
+            drop_idxs = torch.tensor([]).long()
+        drop_positions = positions[drop_idxs]
+
+        mask = torch.zeros((E,)).long() #[E, ]
+        mask = mask.index_fill_(dim=0, index=drop_positions, value=1).bool() #[E, ]
+
+        input_edge_index = batch.edge_index[:, ~mask]
+        input_edge_attr  = batch.edge_attr[~mask]
+
+        pos_edge_index = batch.edge_index[:, mask]
+        pos_edge_attr  = batch.edge_attr[mask]
+        
+        # Sample Negative Edges
+        neg_edges_src, neg_edges_dst = negative_sampling.generate_negative_samples(batch.edge_index.tolist(), pos_edge_index.tolist(), 64)
+        
+        neg_edge_index = torch.stack([torch.tensor(neg_edges_src), torch.tensor(neg_edges_dst)], dim=0)
+        neg_edge_attr = pos_edge_attr.repeat_interleave(64,dim=0)
+
+        # Update the batch object
+        batch.edge_index, batch.edge_attr = input_edge_index, input_edge_attr
+        batch.pos_edge_index, batch.pos_edge_attr = pos_edge_index, pos_edge_attr
+        batch.neg_edge_index, batch.neg_edge_attr = neg_edge_index, neg_edge_attr
+        batch.timestamps = batch.timestamps[~mask]
+
+        batch.pos_y = torch.ones(pos_edge_index.shape[1]  , dtype=torch.int32)
+        batch.neg_y = torch.zeros(neg_edge_index.shape[1], dtype=torch.int32)
+
+        if args.flatten_edges:
+            batch.simp_edge_batch = batch.simp_edge_batch[~mask]
     return
 
 
@@ -498,3 +606,41 @@ def compute_binary_metrics(preds: np.array, labels: np.array):
     recall = sklearn.metrics.recall_score(labels, preds, zero_division=0)
 
     return f1, auc, precision, recall
+
+
+
+def ToMultigraph(data): 
+    x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+    
+    # create full edge_index, assume that original input edge_index is single direction directed, mult-edge is allowed
+    self_loop_indice = edge_index[0] == edge_index[1]
+    self_loops = edge_index[:, self_loop_indice]
+    other_edges = edge_index[:, ~self_loop_indice]
+    reversed_other_edges = torch.stack([other_edges[1], other_edges[0]])
+
+    edge_index = torch.cat([self_loops, other_edges, reversed_other_edges], dim=-1)
+    if edge_attr is not None:
+        edge_attr = torch.cat([edge_attr[self_loop_indice], edge_attr[~self_loop_indice], edge_attr[~self_loop_indice]], dim=0)
+    edge_direction = torch.cat([torch.full((self_loops.size(-1),), 0), torch.full((other_edges.size(-1),), 1), torch.full((reversed_other_edges.size(-1),), 2)], dim=0)
+    
+    # map to simplified edge, currently ignore the edge direction (this is fine)
+    simplified_edge_mapping = {}
+    simplified_edge_batch = []
+    i = 0
+    for edge in edge_index.T:
+        # transform edge to tuple
+        tuple_edge = tuple(edge.tolist())
+        if tuple_edge not in simplified_edge_mapping:
+            simplified_edge_mapping[tuple_edge] = i
+
+            # simplified_edge_index.append(edge)
+            # simplified_edge_mapping[tuple_edge[::-1]] = i+1 #
+            i += 1
+        simplified_edge_batch.append(simplified_edge_mapping[tuple_edge])
+    simplified_edge_batch = torch.LongTensor(simplified_edge_batch)
+
+    data.edge_index = edge_index
+    data.edge_attr = edge_attr
+    data.edge_direction = edge_direction
+    data.simp_edge_batch = simplified_edge_batch
+    return data
