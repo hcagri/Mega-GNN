@@ -27,6 +27,8 @@ def create_parser():
     parser.add_argument("--task", default='edge_class', type=str, help="['edge_class', 'node_class', 'lp']")
     parser.add_argument("--emlps", action='store_true', help="Use emlps in GNN training")
     parser.add_argument("--reverse_mp", action='store_true', help="Use reverse MP in GNN training")
+    parser.add_argument("--reverse_mp_lp", action='store_true', help="Use reverse MP in LP GNN training")
+    parser.add_argument("--adamm_hetero", action='store_true', help="Use reverse MP in LP GNN training")
     parser.add_argument("--ports", action='store_true', help="Use port numberings in GNN training")
     parser.add_argument("--ports_batch", action='store_true', help="Use port numberings in GNN training but compute port numbers after neighborhood sampling.")
     parser.add_argument("--tds", action='store_true', help="Use time deltas (i.e. the time between subsequent transactions) in GNN training")

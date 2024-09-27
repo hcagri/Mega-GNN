@@ -45,11 +45,16 @@ def main():
             name += " Ports Batch"
     if args.node_agg_type == 'genagg':
         name += " NodeAgg=GenAgg"
+    
+    if args.adamm_hetero:
+        name+="adam-hetero"
+
+    project = "ICLR-LP" if args.task =='lp' else "ICLR"
 
     #define a model config dictionary and wandb logging at the same time
     wandb.init(
         mode="disabled" if args.testing else "online",
-        project="ICLR", #replace this with your wandb project name if you want to use wandb logging
+        project=project, #replace this with your wandb project name if you want to use wandb logging
         entity="hcbilgi",
         name=name,
         config={

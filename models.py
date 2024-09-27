@@ -295,7 +295,7 @@ class MultiMPNN(torch.nn.Module):
         self.node_emb = nn.Linear(num_features, n_hidden)
         self.edge_emb = nn.Linear(edge_dim, n_hidden)
 
-        if args.reverse_mp:
+        if args.reverse_mp or args.reverse_mp_lp:
             self.edge_emb_rev = nn.Linear(edge_dim, n_hidden)
 
         if args.edge_agg_type =='adamm':
@@ -304,7 +304,7 @@ class MultiMPNN(torch.nn.Module):
         self.gnn = GnnHelper(num_gnn_layers=num_gnn_layers, n_hidden=n_hidden, edge_updates=edge_updates, final_dropout=final_dropout,
                              index_=index_, deg=deg, args=args)
         
-        if args.reverse_mp:
+        if args.reverse_mp or args.reverse_mp_lp:
             self.gnn  = to_hetero(self.gnn, metadata= (['node'], [('node', 'to', 'node'), ('node', 'rev_to', 'node')]), aggr='mean')
 
         if args.task == 'edge_class':

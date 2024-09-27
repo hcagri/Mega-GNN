@@ -4,8 +4,8 @@ from sklearn.metrics import f1_score
 import sklearn.metrics
 from train_util import AddEgoIds, extract_param, add_arange_ids, get_loaders, evaluate_homo, negative_edge_sampling, \
     evaluate_hetero, evaluate_hetero_lp, save_model, load_model, compute_mrr, compute_auc, gnn_get_predictions_and_labels, lp_compute_metrics, compute_binary_metrics, \
-    ToMultigraph, evaluate_homo_lp
-from data_util import z_norm, assign_ports_with_cpp
+    ToMultigraph, evaluate_homo_lp, HeteroToMultigraph
+from data_util import z_norm, assign_ports_with_cpp, create_hetero_obj
 from models import MultiMPNN
 from torch_geometric.data import Data, HeteroData
 from torch_geometric.nn import to_hetero, summary
@@ -230,6 +230,9 @@ def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds
             batch['node', 'rev_to', 'node'].edge_attr = batch['node', 'rev_to', 'node'].edge_attr[:, 1:]
 
             negative_edge_sampling(batch, args)
+
+            if args.edge_agg_type == 'adamm':
+                HeteroToMultigraph(batch)
             
             ''' Add port numberings after neighborhood sampling. ''' 
             if args.ports and args.ports_batch:
@@ -242,10 +245,16 @@ def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds
 
             out = model(batch)
 
-            pos_labels = batch['node', 'to', 'node'].pos_y
-            pos_pred = out[0]
-            neg_labels = batch['node', 'to', 'node'].neg_y
-            neg_pred = out[1]
+            if isinstance(batch, HeteroData):
+                pos_labels = batch['node', 'to', 'node'].pos_y
+                pos_pred = out[0]
+                neg_labels = batch['node', 'to', 'node'].neg_y
+                neg_pred = out[1]
+            else:
+                pos_labels = batch.pos_y
+                pos_pred = out[0]
+                neg_labels = batch.neg_y
+                neg_pred = out[1]             
 
             loss = lp_loss_fn(pos_pred, neg_pred)
             batch_metrics['loss'].append(loss.detach().item())
@@ -343,6 +352,8 @@ def train_homo_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, 
 
             if args.edge_agg_type=='adamm':
                 batch = ToMultigraph(batch)
+            else:
+                batch = create_hetero_obj(batch.x, batch.y, batch.edge_index, batch.edge_attr, batch.timestamps, args, batch.simp_edge_batch, batch)
 
             ''' Add port numberings after neighborhood sampling. ''' 
             if args.ports and args.ports_batch:
@@ -354,11 +365,17 @@ def train_homo_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, 
             batch.to(device)
 
             out = model(batch)
-
-            pos_labels = batch.pos_y
-            pos_pred = out[0]
-            neg_labels = batch.neg_y
-            neg_pred = out[1]
+            
+            if isinstance(batch, HeteroData):
+                pos_labels = batch['node', 'to', 'node'].pos_y
+                pos_pred = out[0]
+                neg_labels = batch['node', 'to', 'node'].neg_y
+                neg_pred = out[1]
+            else:
+                pos_labels = batch.pos_y
+                pos_pred = out[0]
+                neg_labels = batch.neg_y
+                neg_pred = out[1]
 
             loss = lp_loss_fn(pos_pred, neg_pred)
             batch_metrics['loss'].append(loss.detach().item())
@@ -490,7 +507,12 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
         negative_edge_sampling(sample_batch, args)
     
     if args.edge_agg_type=='adamm':
-        sample_batch = ToMultigraph(sample_batch)
+        if args.adamm_hetero:
+            sample_batch = HeteroToMultigraph(sample_batch)
+        else:
+            sample_batch = ToMultigraph(sample_batch)
+    else:
+        sample_batch = create_hetero_obj(sample_batch.x, sample_batch.y, sample_batch.edge_index, sample_batch.edge_attr, sample_batch.timestamps, args, sample_batch.simp_edge_batch, sample_batch)
 
     if args.ports and args.ports_batch:
         # Add a placeholder for the port features so that the model is loaded correctly!
@@ -515,7 +537,7 @@ def train_gnn(tr_data, val_data, te_data, tr_inds, val_inds, te_inds, args, data
     loss_fn = torch.nn.CrossEntropyLoss(weight=torch.FloatTensor([config.w_ce1, config.w_ce2]).to(device))
 
     if args.task == 'lp':
-        if args.reverse_mp:
+        if args.reverse_mp or args.adamm_hetero:
             model = train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)
         else:
             model = train_homo_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds, model, optimizer, loss_fn, args, config, device, val_data, te_data, data_config)

@@ -137,7 +137,7 @@ def get_data(args, data_config):
 
     #Create heterogenous if reverese MP is enabled
     #TODO: if I observe wierd behaviour, maybe add .detach.clone() to all torch tensors, but I don't think they're attached to any computation graph just yet
-    if args.reverse_mp:
+    if args.reverse_mp  or args.adamm_hetero:
         tr_data = create_hetero_obj(tr_data.x,  tr_data.y,  tr_data.edge_index,  tr_data.edge_attr, tr_data.timestamps, args, tr_simp_edge_batch)
         val_data = create_hetero_obj(val_data.x,  val_data.y,  val_data.edge_index,  val_data.edge_attr, val_data.timestamps, args, val_simp_edge_batch)
         te_data = create_hetero_obj(te_data.x,  te_data.y,  te_data.edge_index,  te_data.edge_attr, te_data.timestamps, args, te_simp_edge_batch)

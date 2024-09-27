@@ -173,7 +173,7 @@ def z_norm(data):
     std = torch.where(std == 0, torch.tensor(1, dtype=torch.float32).cpu(), std)
     return (data - data.mean(0).unsqueeze(0)) / std
 
-def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edge_batch=None):
+def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edge_batch=None, batch=None):
     '''Creates a heterogenous graph object for reverse message passing'''
     data = HeteroGraphData()
 
@@ -197,7 +197,11 @@ def create_hetero_obj(x,  y,  edge_index,  edge_attr, timestamps, args, simp_edg
         data['node', 'rev_to', 'node'].edge_attr[:, [-1, -2]] = data['node', 'rev_to', 'node'].edge_attr[:, [-2, -1]]
     data['node', 'to', 'node'].timestamps = timestamps
     data['node', 'rev_to', 'node'].timestamps = timestamps
-    
+
+    if args.reverse_mp_lp:
+        for key in ['pos_edge_index', 'pos_edge_attr', 'neg_edge_index', 'neg_edge_attr', 'pos_y', 'neg_y']:
+            data['node', 'to', 'node'][key] = batch[key]
+
     return data
 
 def find_parallel_edges(edge_index):

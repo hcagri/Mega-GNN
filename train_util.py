@@ -7,7 +7,7 @@ from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import f1_score
 import json
 import os
-from data_util import assign_ports_with_cpp
+from data_util import assign_ports_with_cpp, create_hetero_obj
 import numpy as np
 import sklearn.metrics
 import negative_sampling
@@ -239,6 +239,9 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
         ind_mask = batch['node', 'to', 'node'].e_id > inds[0]
         negative_edge_sampling(batch, args, ind_mask)
 
+        if args.edge_agg_type == 'adamm':
+            HeteroToMultigraph(batch)
+
         if args.ports and args.ports_batch:
             # To be consistent, sample the edges for forward and backward edge types.
             assign_ports_with_cpp(batch) 
@@ -247,11 +250,16 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
             batch.to(device)
             out = model(batch)
 
-            pos_labels = batch['node', 'to', 'node'].pos_y
-            pos_pred = out[0]
-            neg_labels = batch['node', 'to', 'node'].neg_y
-            neg_pred = out[1]
-
+            if isinstance(batch, HeteroData):
+                pos_labels = batch['node', 'to', 'node'].pos_y
+                pos_pred = out[0]
+                neg_labels = batch['node', 'to', 'node'].neg_y
+                neg_pred = out[1]
+            else:
+                pos_labels = batch.pos_y
+                pos_pred = out[0]
+                neg_labels = batch.neg_y
+                neg_pred = out[1]     
             # Free some GPU memory
             pos_pred, neg_pred, pos_labels, neg_labels = pos_pred.detach().cpu(), neg_pred.detach().cpu(), pos_labels.detach().cpu(), neg_labels.detach().cpu()
             
@@ -307,6 +315,9 @@ def evaluate_homo_lp(loader, inds, model, data, device, args, mode='eval'):
 
         if args.edge_agg_type=='adamm':
             batch = ToMultigraph(batch)
+        else:
+            batch = create_hetero_obj(batch.x, batch.y, batch.edge_index, batch.edge_attr, batch.timestamps, args, batch.simp_edge_batch, batch)
+
 
         if args.ports and args.ports_batch:
             # To be consistent, sample the edges for forward and backward edge types.
@@ -316,10 +327,16 @@ def evaluate_homo_lp(loader, inds, model, data, device, args, mode='eval'):
             batch.to(device)
             out = model(batch)
 
-            pos_labels = batch.pos_y
-            pos_pred = out[0]
-            neg_labels = batch.neg_y
-            neg_pred = out[1]
+            if isinstance(batch, HeteroData):
+                pos_labels = batch['node', 'to', 'node'].pos_y
+                pos_pred = out[0]
+                neg_labels = batch['node', 'to', 'node'].neg_y
+                neg_pred = out[1]
+            else:
+                pos_labels = batch.pos_y
+                pos_pred = out[0]
+                neg_labels = batch.neg_y
+                neg_pred = out[1]
 
             # Free some GPU memory
             pos_pred, neg_pred, pos_labels, neg_labels = pos_pred.detach().cpu(), neg_pred.detach().cpu(), pos_labels.detach().cpu(), neg_labels.detach().cpu()
@@ -644,3 +661,51 @@ def ToMultigraph(data):
     data.edge_direction = edge_direction
     data.simp_edge_batch = simplified_edge_batch
     return data
+
+def HeteroToMultigraph(data): 
+    x, edge_index, edge_attr = data['node'].x, data['node', 'to', 'node'].edge_index, data['node', 'to', 'node'].edge_attr
+    r_edge_index, r_edge_attr =  data['node', 'rev_to', 'node'].edge_index, data['node', 'rev_to', 'node'].edge_attr
+
+    # create full edge_index, assume that original input edge_index is single direction directed, mult-edge is allowed
+    self_loop_indice = edge_index[0] == edge_index[1]
+    r_self_loop_indice = r_edge_index[0] == r_edge_index[1]
+
+    self_loops = edge_index[:, self_loop_indice]
+    r_self_loops = r_edge_index[:, r_self_loop_indice]
+
+    other_edges = edge_index[:, ~self_loop_indice]
+    r_other_edges = r_edge_index[:, ~r_self_loop_indice]
+
+    edge_index = torch.cat([self_loops, r_self_loops, other_edges, r_other_edges], dim=-1)
+    if edge_attr is not None:
+        edge_attr = torch.cat([edge_attr[self_loop_indice], r_edge_attr[r_self_loop_indice], edge_attr[~self_loop_indice], r_edge_attr[~r_self_loop_indice]], dim=0)
+
+    edge_direction = torch.cat([
+        torch.full((self_loops.size(-1),), 0), 
+        torch.full((r_self_loops.size(-1),), 0), 
+        torch.full((other_edges.size(-1),), 1), 
+        torch.full((r_other_edges.size(-1),), 2)
+        ], dim=0)
+    
+    # map to simplified edge, currently ignore the edge direction (this is fine)
+    simplified_edge_mapping = {}
+    simplified_edge_batch = []
+    i = 0
+    for edge in edge_index.T:
+        # transform edge to tuple
+        tuple_edge = tuple(edge.tolist())
+        if tuple_edge not in simplified_edge_mapping:
+            simplified_edge_mapping[tuple_edge] = i
+
+            # simplified_edge_index.append(edge)
+            # simplified_edge_mapping[tuple_edge[::-1]] = i+1 #
+            i += 1
+        simplified_edge_batch.append(simplified_edge_mapping[tuple_edge])
+    simplified_edge_batch = torch.LongTensor(simplified_edge_batch)
+
+    new_data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, edge_direction = edge_direction, simp_edge_batch = simplified_edge_batch)
+
+    for key in ['pos_edge_index', 'pos_edge_attr', 'neg_edge_index', 'neg_edge_attr', 'pos_y', 'neg_y']:
+        new_data[key] = data['node', 'to', 'node'][key]
+    
+    return new_data
