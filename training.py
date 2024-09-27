@@ -232,7 +232,7 @@ def train_hetero_lp(tr_loader, val_loader, te_loader, tr_inds, val_inds, te_inds
             negative_edge_sampling(batch, args)
 
             if args.edge_agg_type == 'adamm':
-                HeteroToMultigraph(batch)
+                batch = HeteroToMultigraph(batch)
             
             ''' Add port numberings after neighborhood sampling. ''' 
             if args.ports and args.ports_batch:

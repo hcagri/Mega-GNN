@@ -240,7 +240,7 @@ def evaluate_hetero_lp(loader, inds, model, data, device, args, mode='eval'):
         negative_edge_sampling(batch, args, ind_mask)
 
         if args.edge_agg_type == 'adamm':
-            HeteroToMultigraph(batch)
+            batch = HeteroToMultigraph(batch)
 
         if args.ports and args.ports_batch:
             # To be consistent, sample the edges for forward and backward edge types.
